@@ -65,8 +65,8 @@
     "publish": [
       {
         "provider": "github",
-        "owner": "arooba-amjad",
-        "repo": "portobello"
+        "owner": "aroobaamjadata-del",
+        "repo": "cafe-pos-app"
       }
     ],
     "directories": {
