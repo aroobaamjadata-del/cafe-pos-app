@@ -1,0 +1,20 @@
+- Searching dependency tree
+Attempting to build a module with a space in the path
+See https://github.com/nodejs/node-gyp/issues/65#issuecomment-368820565 for reasons why this may not work
+gyp verb clean removing "build" directory
+[Error: EPERM: operation not permitted, unlink 'C:\Users\amjad\OneDrive\Desktop\Cloud n Cream POS\node_modules\better-sqlite3\build\Release\better_sqlite3.node'] {
+  errno: -4048,
+  code: 'EPERM',
+  syscall: 'unlink',
+  path: 'C:\\Users\\amjad\\OneDrive\\Desktop\\Cloud n Cream POS\\node_modules\\better-sqlite3\\build\\Release\\better_sqlite3.node'
+}
+
+✖ Rebuild Failed
+
+An unhandled error occurred inside electron-rebuild
+node-gyp failed to rebuild 'C:\Users\amjad\OneDrive\Desktop\Cloud n Cream POS\node_modules\better-sqlite3'
+
+Error: node-gyp failed to rebuild 'C:\Users\amjad\OneDrive\Desktop\Cloud n Cream POS\node_modules\better-sqlite3'
+    at ChildProcess.<anonymous> (C:\Users\amjad\OneDrive\Desktop\Cloud n Cream POS\node_modules\@electron\rebuild\lib\module-type\node-gyp\node-gyp.js:121:24)
+    at ChildProcess.emit (node:events:519:28)
+    at ChildProcess._handle.onexit (node:internal/child_process:294:12)
