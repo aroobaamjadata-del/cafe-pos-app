@@ -1,6 +1,6 @@
 {
   "name": "cloud-n-cream-pos",
-  "version": "1.0.1",
+  "version": "1.0.6",
   "description": "Cloud n Cream - Production-Ready Cafe POS Desktop Application",
   "main": "dist/electron/main.js",
   "homepage": "./",
@@ -24,6 +24,7 @@
   "author": "Cloud n Cream",
   "license": "MIT",
   "dependencies": {
+    "@supabase/supabase-js": "^2.98.0",
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^9.4.3",
     "clsx": "^2.1.0",
@@ -34,6 +35,7 @@
     "jspdf": "^2.5.1",
     "jspdf-autotable": "^3.8.2",
     "lucide-react": "^0.330.0",
+    "node-machine-id": "^1.1.12",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-hot-toast": "^2.4.1",
@@ -62,6 +64,7 @@
   "build": {
     "appId": "com.cloudncream.pos",
     "productName": "Cloud n Cream POS",
+    "artifactName": "Cloud-n-Cream-POS-Setup-${version}.${ext}",
     "publish": [
       {
         "provider": "github",

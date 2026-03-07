@@ -137,6 +137,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     validate: (key: string) => ipcRenderer.invoke('license:validate', key),
     getStatus: () => ipcRenderer.invoke('license:getStatus'),
   },
+
+  // System
+  system: {
+    activate: (tenantCode: string) => ipcRenderer.invoke('system:activate', tenantCode),
+    boot: () => ipcRenderer.invoke('system:boot'),
+  },
+
   // Settings
   settings: {
     get: () => ipcRenderer.invoke('settings:get'),

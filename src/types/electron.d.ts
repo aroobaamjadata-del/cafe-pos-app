@@ -104,6 +104,10 @@ export interface ElectronAPI {
     validate: (key: string) => Promise<{ success: boolean; tenant_id?: string; cafe_name?: string; error?: string }>;
     getStatus: () => Promise<{ active: boolean; tenantId?: string; cafeName?: string; reason?: string }>;
   };
+  system: {
+    activate: (tenantCode: string) => Promise<any>;
+    boot: () => Promise<any>;
+  };
   settings: {
     get: () => Promise<any>;
     update: (data: any) => Promise<any>;

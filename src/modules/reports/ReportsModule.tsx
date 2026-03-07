@@ -57,12 +57,19 @@ export default function ReportsModule() {
     if (!data) return;
     let csvRows: string[] = [];
 
-    if (reportType === 'products' && Array.isArray(data)) {
+    if (reportType === 'daily' && data.orders) {
+      csvRows = ['Order #,Cashier,Method,Total,Status', ...data.orders.map((o: any) => `${o.order_number},${o.cashier_name},${o.payment_method},${o.total},${o.status}`)];
+    } else if (reportType === 'products' && Array.isArray(data)) {
       csvRows = ['Product,Category,Qty Sold,Revenue', ...data.map((r: any) => `${r.name},${r.category},${r.qty_sold},${r.revenue}`)];
     } else if (reportType === 'categories' && Array.isArray(data)) {
       csvRows = ['Category,Orders,Qty Sold,Revenue', ...data.map((r: any) => `${r.category},${r.orders},${r.qty_sold},${r.revenue}`)];
     } else if (Array.isArray(data)) {
       csvRows = ['Date,Orders,Total', ...data.map((r: any) => `${r.date},${r.orders},${r.total}`)];
+    }
+
+    if (csvRows.length === 0) {
+      toast.error('No data to export');
+      return;
     }
 
     const csv = csvRows.join('\n');

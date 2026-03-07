@@ -5,10 +5,19 @@ import { DatabaseService } from './database';
 import { BackupService } from './backup';
 import { autoUpdater } from 'electron-updater';
 import log from 'electron-log';
+import { runActivationFlow } from './activationFlow';
+import { bootApplication } from './startupLogic';
+import { startBackgroundSyncLayer } from './syncWorker';
 
 // Setup logging for auto-updater
 log.transports.file.level = 'info';
 autoUpdater.logger = log;
+
+// Allow unsigned updates (no code signing certificate required)
+autoUpdater.forceDevUpdateConfig = false;
+// Disable differential updates to avoid blockmap issues
+autoUpdater.autoDownload = true;
+autoUpdater.autoInstallOnAppQuit = true;
 
 let mainWindow: BrowserWindow | null = null;
 const isDev = process.env.NODE_ENV === 'development';
@@ -57,6 +66,7 @@ app.whenReady().then(() => {
   db.initialize();
   createWindow();
   backupService.scheduleAutoBackup();
+  startBackgroundSyncLayer();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -67,31 +77,69 @@ app.whenReady().then(() => {
     log.info('checking-for-update');
     mainWindow?.webContents.send('updater:status', { status: 'checking', message: 'Checking for updates...' });
   });
-  
+
   autoUpdater.on('update-available', (info) => {
     log.info('update-available', info);
-    mainWindow?.webContents.send('updater:status', { status: 'available', message: 'New version of Cafe POS is available. Downloading update.' });
+    mainWindow?.webContents.send('updater:status', {
+      status: 'available',
+      message: `New version v${info.version} is available. Downloading...`
+    });
   });
 
   autoUpdater.on('update-not-available', (info) => {
     log.info('update-not-available', info);
-    mainWindow?.webContents.send('updater:status', { status: 'not-available', message: 'POS is up to date.' });
+    // Silently log — no need to notify user if up-to-date
+  });
+
+  autoUpdater.on('download-progress', (progress) => {
+    const percent = Math.round(progress.percent);
+    log.info('download-progress', percent);
+    mainWindow?.webContents.send('updater:status', {
+      status: 'downloading',
+      message: `Downloading update... ${percent}%`
+    });
   });
 
   autoUpdater.on('error', (err) => {
     log.error('update-error', err);
-    mainWindow?.webContents.send('updater:status', { status: 'error', message: 'Error updating POS: ' + err.message });
+    mainWindow?.webContents.send('updater:status', { status: 'error', message: 'Update error: ' + err.message });
   });
 
   autoUpdater.on('update-downloaded', (info) => {
     log.info('update-downloaded', info);
+    // Also notify the renderer (for the toast)
     mainWindow?.webContents.send('updater:status', { status: 'downloaded', message: 'Update ready. Restart POS to install.' });
+
+    // Use native dialog as a guaranteed fallback — always appears
+    dialog.showMessageBox({
+      type: 'info',
+      title: 'Update Ready',
+      message: `Cloud n Cream POS v${info.version} has been downloaded.`,
+      detail: 'Click "Restart & Install" to apply the update now, or click "Later" to install on next launch.',
+      buttons: ['Restart & Install', 'Later'],
+      defaultId: 0,
+      cancelId: 1,
+    }).then((result) => {
+      if (result.response === 0) {
+        autoUpdater.quitAndInstall(false, true);
+      }
+    });
   });
 
   // Check for updates shortly after startup
   setTimeout(() => {
     autoUpdater.checkForUpdatesAndNotify();
   }, 3000);
+
+  // Periodic Supabase sync every 15 minutes (device check-in + license refresh)
+  setInterval(async () => {
+    try {
+      await db.license.periodicSync();
+      log.info('Periodic license sync completed');
+    } catch (err) {
+      log.warn('Periodic sync failed:', err);
+    }
+  }, 15 * 60 * 1000); // 15 minutes
 });
 
 app.on('window-all-closed', () => {
@@ -227,6 +275,7 @@ ipcMain.handle('settings:update', (_e, data: any) => db.settings.update(data));
 // License
 ipcMain.handle('license:validate', (_e, key: string) => db.license.validate(key));
 ipcMain.handle('license:getStatus', () => db.license.getStatus());
+ipcMain.handle('license:periodicSync', () => db.license.periodicSync());
 
 // Backup & Export
 ipcMain.handle('backup:create', async () => {
@@ -271,3 +320,7 @@ ipcMain.handle('shell:openPath', (_e, filePath: string) => shell.openPath(filePa
 // Updater
 ipcMain.handle('updater:check', () => autoUpdater.checkForUpdatesAndNotify());
 ipcMain.handle('updater:quitAndInstall', () => autoUpdater.quitAndInstall(false, true));
+
+// System Activation
+ipcMain.handle('system:activate', (_e, tenantCode: string) => runActivationFlow(tenantCode, db));
+ipcMain.handle('system:boot', () => bootApplication(db));

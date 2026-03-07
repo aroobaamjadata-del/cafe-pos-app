@@ -10,9 +10,19 @@ export default function App() {
   const [checkingAuth, setCheckingAuth] = useState(true);
 
   useEffect(() => {
-    // Check local database for active license
-    window.electronAPI.license.getStatus().then((res) => {
-      setActivation(res.active, res.tenantId);
+    // Check local database for active license or tenant
+    window.electronAPI.system.boot().then((res: any) => {
+      if (res.status === 'ready') {
+        const tenantId = res.tenant ? (res.tenant.tenant_id || res.tenant.id) : undefined;
+        setActivation(true, tenantId);
+      } else {
+        setActivation(false, undefined);
+      }
+      setCheckingAuth(false);
+    }).catch((err) => {
+      console.error('Failed to boot system:', err);
+      toast.error('Failed to boot system: ' + err.message);
+      setActivation(false, undefined);
       setCheckingAuth(false);
     });
   }, [setActivation]);

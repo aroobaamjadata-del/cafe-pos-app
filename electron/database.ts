@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import { app } from 'electron';
 import * as bcrypt from 'bcryptjs';
 import * as crypto from 'crypto';
+import { enqueueSyncOperation } from './sqliteDatabase';
 
 const ENCRYPTION_KEY = crypto.scryptSync('cloud-n-cream-super-secure-key', 'salt', 32);
 const IV_LENGTH = 16;
@@ -343,6 +344,42 @@ export class DatabaseService {
       CREATE INDEX IF NOT EXISTS idx_recipes_product ON recipes(product_id);
       CREATE INDEX IF NOT EXISTS idx_recipes_ingredient ON recipes(ingredient_id);
       CREATE INDEX IF NOT EXISTS idx_ingredient_movements ON ingredient_movements(ingredient_id);
+
+      -- ─── Supabase Sync Cache Tables ──────────────────────────────────────────────
+
+      CREATE TABLE IF NOT EXISTS license_cache (
+        id INTEGER PRIMARY KEY DEFAULT 1,
+        license_key_hash TEXT NOT NULL,
+        license_id TEXT,
+        status TEXT NOT NULL DEFAULT 'unknown',
+        expires_at TEXT,
+        features TEXT,
+        tenant_id TEXT,
+        last_validated_at TEXT,
+        encrypted_payload TEXT,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS tenant_cache (
+        id INTEGER PRIMARY KEY DEFAULT 1,
+        tenant_id TEXT NOT NULL,
+        business_name TEXT,
+        tenant_code TEXT,
+        status TEXT NOT NULL DEFAULT 'unknown',
+        subscription_plan TEXT,
+        last_synced_at TEXT,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS pos_devices_local (
+        id INTEGER PRIMARY KEY DEFAULT 1,
+        hardware_id TEXT NOT NULL UNIQUE,
+        device_name TEXT,
+        status TEXT DEFAULT 'online',
+        last_seen_at TEXT,
+        registered_at TEXT,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
     `);
   }
 
@@ -699,6 +736,14 @@ class ProductsService {
         VALUES (?,?,?,?)
       `).run(result.lastInsertRowid, data.initial_stock || 0, data.min_quantity || 5, data.unit || 'pcs');
     }
+
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM products WHERE id=?').get(result.lastInsertRowid);
+      enqueueSyncOperation('products', 'INSERT', fullRow);
+    } catch (err) {
+      console.error('Local sync queue failed:', err);
+    }
+
     return { success: true, id: result.lastInsertRowid };
   }
 
@@ -711,11 +756,27 @@ class ProductsService {
     if (data.min_quantity !== undefined) {
       this.db.prepare('UPDATE inventory SET min_quantity=?, unit=? WHERE product_id=?').run(data.min_quantity, data.unit || 'pcs', id);
     }
+
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM products WHERE id=?').get(id);
+      enqueueSyncOperation('products', 'UPDATE', fullRow);
+    } catch (err) {
+      console.error('Local sync queue failed:', err);
+    }
+
     return { success: true };
   }
 
   delete(id: number): any {
     this.db.prepare('UPDATE products SET deleted_at=CURRENT_TIMESTAMP WHERE id=?').run(id);
+
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM products WHERE id=?').get(id);
+      enqueueSyncOperation('products', 'UPDATE', fullRow); // Note: Since it's a soft-delete (deleted_at), we treat it as an UPDATE for sync.
+    } catch (err) {
+      console.error('Local sync queue failed:', err);
+    }
+
     return { success: true };
   }
 }
@@ -811,6 +872,21 @@ class OrdersService {
           WHERE id = ?
         `).run(order.total, Math.floor(order.total / 100), order.customer_id);
       }
+
+      // ─── OFFLINE SYNC QUEUE INJECTION ──────────────────────────────
+      try {
+        // Fetch the full rows as they exist in SQLite to ensure schema matching
+        const fullOrder = this.db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+        enqueueSyncOperation('orders', 'INSERT', fullOrder);
+
+        const fullItems = this.db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(orderId);
+        for (const item of fullItems) {
+           enqueueSyncOperation('order_items', 'INSERT', item);
+        }
+      } catch (syncErr) {
+        console.error('Failed to queue offline sync event for order:', syncErr);
+      }
+      // ───────────────────────────────────────────────────────────────
 
       return { success: true, id: orderId, order_number: orderNumber };
     });
@@ -1379,61 +1455,276 @@ class SettingsService {
   }
 }
 
-// ─── License Service ───────────────────────────────────────────────────────────
+// ─── License Service (Supabase + Offline Cache) ──────────────────────────────
+import * as os from 'os';
+import { supabase, isSupabaseConfigured } from './supabase';
+
+function getHardwareId(): string {
+  // Generate a stable unique ID from hostname + first non-internal MAC address
+  const interfaces = os.networkInterfaces();
+  let mac = '';
+  for (const iface of Object.values(interfaces)) {
+    if (!iface) continue;
+    for (const info of iface) {
+      if (!info.internal && info.mac && info.mac !== '00:00:00:00:00:00') {
+        mac = info.mac;
+        break;
+      }
+    }
+    if (mac) break;
+  }
+  const raw = `${os.hostname()}-${mac}-${os.platform()}-${os.arch()}`;
+  return crypto.createHash('sha256').update(raw).digest('hex').slice(0, 32);
+}
+
 export class LicenseService {
   constructor(private db: Database.Database) {}
 
-  async validate(licenseKey: string): Promise<any> {
-    if (!licenseKey || licenseKey.length < 10) {
-      throw new Error('Invalid license key format');
+  // ─── Validate via Supabase (online) ────────────────────────────────────────
+  private async validateViaSupabase(licenseKey: string): Promise<{ success: boolean; data?: any; error?: string }> {
+    if (!isSupabaseConfigured()) {
+      return { success: false, error: 'Supabase not configured' };
     }
 
     try {
-      let data: any;
-      // We perform the actual HTTPS fetch but add mock handlers since backend URL defaults to non-existent link.
-      if (licenseKey.startsWith('DEMO-') || licenseKey === '1234-5678-9012-3456') {
-         data = { tenant_id: 'tenant_' + crypto.randomUUID(), cafe_name: 'Demo Cafe Activated', features: ['pos', 'inventory', 'reports'] };
-      } else {
-         const response = await fetch('https://api.v1.cloudncream.com/api/validate-license', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ license_key: licenseKey })
-         });
-         
-         if (!response.ok) {
-           throw new Error('Network error or invalid license code');
-         }
-         data = await response.json();
+      // 1a. Try licenses table first (proper license_key lookup)
+      const { data: license, error: licErr } = await supabase
+        .from('licenses')
+        .select(`id, license_key, status, expires_at, features, current_activations, max_activations, tenant:tenants(id, business_name, tenant_code, status, subscription_plan)`)
+        .eq('license_key', licenseKey)
+        .maybeSingle();
+
+      if (!licErr && license) {
+        // Validate the license
+        if (license.status !== 'active') return { success: false, error: `License is ${license.status}` };
+        if (license.expires_at && new Date(license.expires_at) < new Date()) return { success: false, error: 'License has expired' };
+
+        const tenant = Array.isArray(license.tenant) ? license.tenant[0] : license.tenant;
+        if (!tenant) return { success: false, error: 'Tenant not found for this license' };
+        if (tenant.status !== 'active') return { success: false, error: `Tenant account is ${tenant.status}` };
+        if (license.max_activations && license.current_activations >= license.max_activations) {
+          return { success: false, error: 'Maximum number of devices reached for this license' };
+        }
+        return { success: true, data: { license, tenant } };
       }
 
-      // Encrypt and store local data
-      const secureData = JSON.stringify({
-        licenseKey,
-        tenantId: data.tenant_id,
-        cafeName: data.cafe_name,
-        features: data.features,
-        activatedAt: new Date().toISOString()
-      });
-      
-      const encrypted = encryptText(secureData);
-      
-      const stmt = this.db.prepare('INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)');
-      stmt.run('license_data', encrypted);
-      stmt.run('license_status', 'active');
-      
-      // Auto-set store name if setting is empty
-      const storeNameStmt = this.db.prepare("SELECT value FROM settings WHERE key='store_name'");
-      const storeName = storeNameStmt.get() as any;
-      if (!storeName || !storeName.value) {
-        stmt.run('store_name', data.cafe_name);
+      // 1b. Fallback: try treating the input as a tenant_code (e.g. TEN-RYFZKZ)
+      const { data: tenantByCode, error: tenErr } = await supabase
+        .from('tenants')
+        .select(`id, business_name, tenant_code, status, subscription_plan`)
+        .eq('tenant_code', licenseKey)
+        .maybeSingle();
+
+      if (!tenErr && tenantByCode) {
+        if (tenantByCode.status !== 'active') {
+          return { success: false, error: `Tenant account is ${tenantByCode.status}` };
+        }
+
+        // Synthesize a license-like object from tenant data
+        const syntheticLicense = {
+          id: tenantByCode.id,
+          license_key: licenseKey,
+          status: 'active',
+          expires_at: null,
+          features: ['pos', 'inventory', 'reports', 'expenses'],
+          current_activations: 0,
+          max_activations: null,
+        };
+        return { success: true, data: { license: syntheticLicense, tenant: tenantByCode } };
       }
 
-      return { success: true, tenant_id: data.tenant_id, cafe_name: data.cafe_name };
-    } catch (error: any) {
-      return { success: false, error: 'Failed to validate: ' + error.message };
+      return { success: false, error: 'Invalid license key or tenant code' };
+    } catch (err: any) {
+      return { success: false, error: 'Network error: ' + err.message };
     }
   }
 
+  // ─── Device Check-In (pos_devices table in Supabase) ────────────────────────
+  private async checkInDevice(hardwareId: string, licenseId: string): Promise<void> {
+    if (!isSupabaseConfigured()) return;
+    try {
+      await supabase
+        .from('pos_devices')
+        .update({ last_seen_at: new Date().toISOString(), status: 'online' })
+        .eq('hardware_id', hardwareId);
+
+      // Also try to register if not yet in Supabase
+      await supabase.from('pos_devices').upsert({
+        hardware_id: hardwareId,
+        device_name: os.hostname(),
+        license_id: licenseId,
+        status: 'online',
+        last_seen_at: new Date().toISOString(),
+      }, { onConflict: 'hardware_id', ignoreDuplicates: false });
+    } catch (_) {
+      // Non-critical — don't block POS
+    }
+  }
+
+  // ─── Save to local cache ────────────────────────────────────────────────────
+  private saveToCache(licenseKey: string, payload: any): void {
+    const keyHash = crypto.createHash('sha256').update(licenseKey).digest('hex');
+    const encrypted = encryptText(JSON.stringify(payload));
+    const now = new Date().toISOString();
+
+    this.db.prepare(`
+      INSERT OR REPLACE INTO license_cache (id, license_key_hash, license_id, status, expires_at, features, tenant_id, last_validated_at, encrypted_payload, updated_at)
+      VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `).run(
+      keyHash,
+      payload.licenseId,
+      payload.status,
+      payload.expiresAt,
+      JSON.stringify(payload.features),
+      payload.tenantId,
+      now,
+      encrypted
+    );
+
+    this.db.prepare(`
+      INSERT OR REPLACE INTO tenant_cache (id, tenant_id, business_name, tenant_code, status, subscription_plan, last_synced_at, updated_at)
+      VALUES (1, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `).run(
+      payload.tenantId,
+      payload.cafeName,
+      payload.tenantCode,
+      payload.tenantStatus,
+      payload.subscriptionPlan,
+      now
+    );
+
+    const hardwareId = getHardwareId();
+    this.db.prepare(`
+      INSERT OR REPLACE INTO pos_devices_local (id, hardware_id, device_name, status, last_seen_at, registered_at)
+      VALUES (1, ?, ?, 'online', ?, ?)
+    `).run(hardwareId, os.hostname(), now, now);
+
+    // Also keep old settings for backward compatibility
+    const stmt = this.db.prepare('INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)');
+    stmt.run('license_status', 'active');
+    stmt.run('license_data', encryptText(JSON.stringify({ licenseKey, tenantId: payload.tenantId, cafeName: payload.cafeName })));
+    if (payload.cafeName) stmt.run('store_name', payload.cafeName);
+  }
+
+  // ─── Read from local cache ──────────────────────────────────────────────────
+  private readFromCache(licenseKey: string): { valid: boolean; data?: any; reason?: string } {
+    try {
+      const keyHash = crypto.createHash('sha256').update(licenseKey).digest('hex');
+      const row = this.db.prepare('SELECT * FROM license_cache WHERE id = 1 AND license_key_hash = ?').get(keyHash) as any;
+      if (!row) return { valid: false, reason: 'No cached license found' };
+
+      // Check if cached license is expired
+      if (row.expires_at && new Date(row.expires_at) < new Date()) {
+        return { valid: false, reason: 'Cached license has expired' };
+      }
+
+      const decrypted = decryptText(row.encrypted_payload);
+      if (!decrypted) return { valid: false, reason: 'Cache data is corrupted' };
+
+      const tenant = this.db.prepare('SELECT * FROM tenant_cache WHERE id = 1').get() as any;
+
+      return {
+        valid: row.status === 'active',
+        data: { ...JSON.parse(decrypted), tenantStatus: tenant?.status, cachedAt: row.last_validated_at }
+      };
+    } catch {
+      return { valid: false, reason: 'Cache read error' };
+    }
+  }
+
+  // ─── PUBLIC: validate (called on Activation Screen) ────────────────────────
+  async validate(licenseKey: string): Promise<any> {
+    if (!licenseKey || licenseKey.length < 8) {
+      return { success: false, error: 'License key too short.' };
+    }
+
+    const hardwareId = getHardwareId();
+
+    // BYPASS FOR DEVELOPMENT
+    if (licenseKey === 'DEV-BYPASS' || licenseKey === '12345678') {
+      const payload = {
+        licenseId: 'dev-license-id',
+        licenseKey,
+        status: 'active',
+        expiresAt: null,
+        features: ['pos', 'inventory', 'reports'],
+        tenantId: 'dev-tenant-id',
+        cafeName: 'Dev Local Cafe',
+        tenantCode: 'DEV-CAFE',
+        tenantStatus: 'active',
+        subscriptionPlan: 'pro',
+        activatedAt: new Date().toISOString(),
+        mode: 'offline',
+      };
+      
+      this.saveToCache(licenseKey, payload);
+      this.db.prepare('UPDATE pos_devices_local SET last_seen_at = ?, status = ? WHERE id = 1')
+        .run(new Date().toISOString(), 'online');
+
+      return {
+        success: true,
+        mode: 'offline',
+        tenant_id: 'dev-tenant-id',
+        cafe_name: 'Dev Local Cafe',
+        features: payload.features,
+      };
+    }
+
+    // 1. Try Supabase first
+    const online = await this.validateViaSupabase(licenseKey);
+
+    if (online.success && online.data) {
+      const { license, tenant } = online.data;
+      const payload = {
+        licenseId: license.id,
+        licenseKey,
+        status: 'active',
+        expiresAt: license.expires_at,
+        features: license.features || ['pos', 'inventory', 'reports'],
+        tenantId: tenant.id,
+        cafeName: tenant.business_name,
+        tenantCode: tenant.tenant_code,
+        tenantStatus: tenant.status,
+        subscriptionPlan: tenant.subscription_plan,
+        activatedAt: new Date().toISOString(),
+        mode: 'online',
+      };
+
+      this.saveToCache(licenseKey, payload);
+      await this.checkInDevice(hardwareId, license.id);
+
+      return {
+        success: true,
+        mode: 'online',
+        tenant_id: tenant.id,
+        cafe_name: tenant.business_name,
+        features: payload.features,
+      };
+    }
+
+    // 2. Supabase not configured or unreachable — try offline cache
+    const cached = this.readFromCache(licenseKey);
+    if (cached.valid && cached.data) {
+      // Update local device last_seen
+      this.db.prepare('UPDATE pos_devices_local SET last_seen_at = ?, status = ? WHERE id = 1')
+        .run(new Date().toISOString(), 'online');
+
+      return {
+        success: true,
+        mode: 'offline',
+        tenant_id: cached.data.tenantId,
+        cafe_name: cached.data.cafeName,
+        features: cached.data.features,
+        offline_reason: 'Offline mode — license validated from local cache',
+      };
+    }
+
+    // 3. Complete failure — new activation needed, possibly with cache error or supabase error
+    const errorReason = online.error && !online.error.includes('not configured') ? online.error : (cached.reason || 'Could not validate license');
+    return { success: false, error: errorReason };
+  }
+
+  // ─── PUBLIC: getStatus (called on app startup) ──────────────────────────────
   getStatus(): any {
     const row = this.db.prepare("SELECT value FROM settings WHERE key = 'license_status'").get() as any;
     if (!row || row.value !== 'active') return { active: false };
@@ -1442,9 +1733,56 @@ export class LicenseService {
     if (!dataRow) return { active: false };
 
     const decrypted = decryptText(dataRow.value);
-    if (!decrypted) return { active: false, reason: 'tampered' }; // Tampered data
+    if (!decrypted) return { active: false, reason: 'tampered' };
 
     const parsed = JSON.parse(decrypted);
-    return { active: true, tenantId: parsed.tenantId, cafeName: parsed.cafeName };
+
+    // Read tenant cache for fuller offline info
+    const tenant = this.db.prepare('SELECT * FROM tenant_cache WHERE id = 1').get() as any;
+    const device = this.db.prepare('SELECT * FROM pos_devices_local WHERE id = 1').get() as any;
+    const licCache = this.db.prepare('SELECT * FROM license_cache WHERE id = 1').get() as any;
+
+    // Check if license is expired in cache
+    if (licCache?.expires_at && new Date(licCache.expires_at) < new Date()) {
+      return { active: false, reason: 'expired' };
+    }
+
+    return {
+      active: true,
+      tenantId: parsed.tenantId,
+      cafeName: parsed.cafeName || tenant?.business_name,
+      tenantStatus: tenant?.status,
+      hardwareId: device?.hardware_id,
+      lastSeen: device?.last_seen_at,
+      lastValidated: licCache?.last_validated_at,
+    };
+  }
+
+  // ─── PUBLIC: periodicSync (called every 15 minutes when online) ─────────────
+  async periodicSync(): Promise<{ synced: boolean; message?: string }> {
+    if (!isSupabaseConfigured()) return { synced: false, message: 'Supabase not configured' };
+
+    try {
+      const hardwareId = getHardwareId();
+      const device = this.db.prepare('SELECT * FROM pos_devices_local WHERE id = 1').get() as any;
+      const licCache = this.db.prepare('SELECT * FROM license_cache WHERE id = 1').get() as any;
+      if (!licCache) return { synced: false, message: 'No cached license to sync' };
+
+      // Update device last_seen in Supabase
+      if (device) {
+        await supabase.from('pos_devices')
+          .update({ last_seen_at: new Date().toISOString(), status: 'online' })
+          .eq('hardware_id', hardwareId);
+      }
+
+      // Update local cache last_seen
+      this.db.prepare('UPDATE pos_devices_local SET last_seen_at = ?, status = ? WHERE id = 1')
+        .run(new Date().toISOString(), 'online');
+
+      return { synced: true };
+    } catch (err: any) {
+      return { synced: false, message: err.message };
+    }
   }
 }
+
