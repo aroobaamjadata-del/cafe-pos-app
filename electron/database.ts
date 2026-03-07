@@ -83,7 +83,10 @@ export class DatabaseService {
     this.reports = new ReportsService(this.db);
     this.settings = new SettingsService(this.db);
     this.license = new LicenseService(this.db);
+    this.roles = new RolesService(this.db);
   }
+
+  public roles!: RolesService;
 
   private createSchema(): void {
     this.db.exec(`
@@ -388,8 +391,8 @@ export class DatabaseService {
     const existingRoles = this.db.prepare('SELECT COUNT(*) as c FROM roles').get() as any;
     if (existingRoles.c === 0) {
       const adminPerms = JSON.stringify(['*']);
-      const managerPerms = JSON.stringify(['dashboard','pos','menu','inventory','reports','staff','settings']);
-      const cashierPerms = JSON.stringify(['pos','dashboard']);
+      const managerPerms = JSON.stringify(['dashboard','pos','menu','recipes','inventory','reports','customers','expenses','staff','backup']);
+      const cashierPerms = JSON.stringify(['pos','dashboard','customers']);
       this.db.prepare(`INSERT INTO roles (name, permissions) VALUES (?,?)`).run('Admin', adminPerms);
       this.db.prepare(`INSERT INTO roles (name, permissions) VALUES (?,?)`).run('Manager', managerPerms);
       this.db.prepare(`INSERT INTO roles (name, permissions) VALUES (?,?)`).run('Cashier', cashierPerms);
@@ -606,6 +609,28 @@ class AuthService {
   logout(): { success: boolean } { return { success: true }; }
 }
 
+// ─── Roles Service ─────────────────────────────────────────────────────────────
+class RolesService {
+  constructor(private db: Database.Database) {}
+
+  getAll(): any[] {
+    return this.db.prepare('SELECT * FROM roles').all();
+  }
+
+  syncDown(payload: any[]): void {
+     const stmt = this.db.prepare(`
+       INSERT OR REPLACE INTO roles (id, name, permissions, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+     `);
+     const trans = this.db.transaction((items) => {
+       for (const r of items) {
+         stmt.run(r.id, r.name, typeof r.permissions === 'string' ? r.permissions : JSON.stringify(r.permissions), r.created_at, r.updated_at);
+       }
+     });
+     trans(payload);
+  }
+}
+
 // ─── Users Service ─────────────────────────────────────────────────────────────
 class UsersService {
   constructor(private db: Database.Database) {}
@@ -625,6 +650,12 @@ class UsersService {
       INSERT INTO users (username, password_hash, full_name, email, phone, role_id)
       VALUES (?,?,?,?,?,?)
     `).run(data.username, hash, data.full_name, data.email || null, data.phone || null, data.role_id);
+    
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM users WHERE id=?').get(result.lastInsertRowid);
+      enqueueSyncOperation('staff', 'INSERT', fullRow);
+    } catch(err) { console.error('Roles/Staff Sync Error', err); }
+
     return { success: true, id: result.lastInsertRowid };
   }
 
@@ -633,18 +664,49 @@ class UsersService {
       UPDATE users SET full_name=?, email=?, phone=?, role_id=?, is_active=?, updated_at=CURRENT_TIMESTAMP
       WHERE id=?
     `).run(data.full_name, data.email || null, data.phone || null, data.role_id, data.is_active ? 1 : 0, id);
+    
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM users WHERE id=?').get(id);
+      enqueueSyncOperation('staff', 'UPDATE', fullRow);
+    } catch(err) { console.error('Roles/Staff Sync Error', err); }
+
     return { success: true };
   }
 
   delete(id: number): any {
     this.db.prepare('UPDATE users SET deleted_at=CURRENT_TIMESTAMP WHERE id=?').run(id);
+
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM users WHERE id=?').get(id);
+      enqueueSyncOperation('staff', 'UPDATE', fullRow);
+    } catch(err) { console.error('Roles/Staff Sync Error', err); }
+
     return { success: true };
   }
 
   changePassword(id: number, newPassword: string): any {
     const hash = bcrypt.hashSync(newPassword, 10);
     this.db.prepare('UPDATE users SET password_hash=?, updated_at=CURRENT_TIMESTAMP WHERE id=?').run(hash, id);
+
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM users WHERE id=?').get(id);
+      enqueueSyncOperation('staff', 'UPDATE', fullRow);
+    } catch(err) { console.error('Roles/Staff Sync Error', err); }
+
     return { success: true };
+  }
+
+  syncDown(payload: any[]): void {
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO users (id, username, password_hash, full_name, email, phone, role_id, is_active, last_login, created_at, updated_at, deleted_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const trans = this.db.transaction((items) => {
+      for (const u of items) {
+        stmt.run(u.id, u.username, u.password_hash, u.full_name, u.email || null, u.phone || null, u.role_id, u.is_active ? 1 : 0, u.last_login, u.created_at, u.updated_at, u.deleted_at);
+      }
+    });
+    trans(payload);
   }
 }
 

@@ -1,7 +1,9 @@
 import { supabase } from './supabaseClient';
 import { getCachedTenant, getUnsyncedOperations, markOperationSynced, markOperationError } from './sqliteDatabase';
 
-export const startBackgroundSyncLayer = () => {
+import { DatabaseService } from './database';
+
+export const startBackgroundSyncLayer = (db: DatabaseService) => {
     // Check sync queue every 30 seconds
     setInterval(async () => {
         try {
@@ -10,6 +12,52 @@ export const startBackgroundSyncLayer = () => {
             console.error('Background Sync Worker Error:', err);
         }
     }, 30000); 
+
+    // Pull staff/role updates every 5 minutes
+    setInterval(async () => {
+        try {
+            await syncDownProtocol(db);
+        } catch (err) {
+            console.error('Background Sync Down Error:', err);
+        }
+    }, 300000);
+
+    // Initial pull on start
+    syncDownProtocol(db).catch(err => console.error('Initial Sync Down Failed:', err));
+};
+
+/**
+ * ─── The Sync Down Protocol ──────────────────────────────────────────────────
+ * Pulls master data (Staff, Roles) from Supabase to provide valid offline login.
+ */
+export const syncDownProtocol = async (db: DatabaseService) => {
+    const tenant = getCachedTenant();
+    if (!tenant) return;
+
+    try {
+        // 1. Pull Roles
+        const { data: remoteRoles, error: rolesError } = await supabase
+            .from('roles')
+            .select('id, name, permissions, created_at, updated_at')
+            .eq('tenant_id', tenant.tenant_id);
+
+        if (!rolesError && remoteRoles) {
+            db.roles.syncDown(remoteRoles);
+        }
+
+        // 2. Pull Staff
+        const { data: remoteStaff, error: staffError } = await supabase
+            .from('staff')
+            .select('id, username, password_hash, full_name, email, phone, role_id, is_active, last_login, created_at, updated_at, deleted_at')
+            .eq('tenant_id', tenant.tenant_id);
+            
+        if (!staffError && remoteStaff) {
+            db.users.syncDown(remoteStaff);
+        }
+        
+    } catch (err) {
+        console.error('[SYNC DOWN] Hard failure:', err);
+    }
 };
 
 /**

@@ -28,8 +28,16 @@ const moduleComponents: Record<string, React.ComponentType> = {
 };
 
 export default function AppShell() {
-  const { activeModule, sidebarCollapsed } = useAppStore();
+  const { activeModule, sidebarCollapsed, user } = useAppStore();
   const ActiveComponent = moduleComponents[activeModule] || Dashboard;
+
+  const hasPermission = (module: string) => {
+    if (!user) return false;
+    if (user.permissions.includes('*')) return true;
+    return user.permissions.includes(module);
+  };
+
+  const isPermitted = hasPermission(activeModule);
 
   return (
     <div className="h-screen flex flex-col bg-dark-900 overflow-hidden">
@@ -42,7 +50,17 @@ export default function AppShell() {
           }`}
         >
           <div className="animate-fade-in h-full">
-            <ActiveComponent />
+            {isPermitted ? (
+              <ActiveComponent />
+            ) : (
+              <div className="flex flex-col items-center justify-center h-full text-center">
+                <div className="w-16 h-16 bg-red-500/10 rounded-full flex items-center justify-center mb-4">
+                  <span className="text-red-400 text-2xl">🔒</span>
+                </div>
+                <h2 className="text-xl font-bold text-white mb-2">Access Denied</h2>
+                <p className="text-dark-400">You do not have permission to view the {activeModule} module.</p>
+              </div>
+            )}
           </div>
         </main>
       </div>

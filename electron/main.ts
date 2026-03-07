@@ -66,7 +66,7 @@ app.whenReady().then(() => {
   db.initialize();
   createWindow();
   backupService.scheduleAutoBackup();
-  startBackgroundSyncLayer();
+  startBackgroundSyncLayer(db);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

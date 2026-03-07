@@ -16,17 +16,17 @@ interface NavItem {
 }
 
 const navItems: NavItem[] = [
-  { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { id: 'pos', label: 'Punch Order', icon: ShoppingCart },
-  { id: 'menu', label: 'Menu', icon: UtensilsCrossed },
-  { id: 'recipes', label: 'Recipes', icon: FlaskConical },
-  { id: 'inventory', label: 'Inventory', icon: Package },
-  { id: 'reports', label: 'Reports', icon: BarChart3 },
-  { id: 'customers', label: 'Customers', icon: Users },
-  { id: 'expenses', label: 'Expenses', icon: DollarSign },
-  { id: 'staff', label: 'Staff', icon: UserCheck },
-  { id: 'settings', label: 'Settings', icon: Settings },
-  { id: 'backup', label: 'Backup', icon: Database },
+  { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, permission: 'dashboard' },
+  { id: 'pos', label: 'Punch Order', icon: ShoppingCart, permission: 'pos' },
+  { id: 'menu', label: 'Menu', icon: UtensilsCrossed, permission: 'menu' },
+  { id: 'recipes', label: 'Recipes', icon: FlaskConical, permission: 'recipes' },
+  { id: 'inventory', label: 'Inventory', icon: Package, permission: 'inventory' },
+  { id: 'reports', label: 'Reports', icon: BarChart3, permission: 'reports' },
+  { id: 'customers', label: 'Customers', icon: Users, permission: 'customers' },
+  { id: 'expenses', label: 'Expenses', icon: DollarSign, permission: 'expenses' },
+  { id: 'staff', label: 'Staff', icon: UserCheck, permission: 'staff' },
+  { id: 'settings', label: 'Settings', icon: Settings, permission: 'settings' },
+  { id: 'backup', label: 'Backup', icon: Database, permission: 'backup' },
 ];
 
 export default function Sidebar() {
