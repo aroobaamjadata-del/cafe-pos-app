@@ -1,4 +1,4 @@
-import { supabase } from './supabaseClient';
+import { supabase } from './supabase';
 import * as os from 'os';
 import * as crypto from 'crypto';
 

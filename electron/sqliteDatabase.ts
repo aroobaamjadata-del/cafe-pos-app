@@ -52,7 +52,7 @@ export const cacheTenantLocal = (tenant: any) => {
 };
 
 export const getCachedTenant = () => {
-  return getCacheDb().prepare('SELECT * FROM tenant_cache WHERE id = 1 AND status = "active"').get() as any;
+  return getCacheDb().prepare("SELECT * FROM tenant_cache WHERE id = 1 AND status = 'active'").get() as any;
 };
 
 // ─── Device Cache Methods ──────────────────────────────────────────────────

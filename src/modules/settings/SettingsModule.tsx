@@ -5,14 +5,26 @@ import { useAppStore } from '../../store/appStore';
 import { Settings as SettingsType } from '../../types';
 
 export default function SettingsModule() {
-  const { settings, setSettings } = useAppStore();
+  const { user, settings, setSettings } = useAppStore();
   const [form, setForm] = useState<Partial<SettingsType>>({});
   const [saving, setSaving] = useState(false);
-  const [tab, setTab] = useState<'general' | 'receipt' | 'system'>('general');
+  const [tab, setTab] = useState<'general' | 'receipt' | 'loyalty' | 'system' | 'account'>('general');
+  const [categories, setCategories] = useState<any[]>([]);
+
+  // Password state
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [changingPwd, setChangingPwd] = useState(false);
 
   useEffect(() => {
     if (settings) setForm(settings);
+    loadCategories();
   }, [settings]);
+
+  const loadCategories = async () => {
+    const cats = await window.electronAPI.categories.getAll();
+    setCategories(cats);
+  };
 
   const handleSave = async () => {
     setSaving(true);
@@ -40,7 +52,7 @@ export default function SettingsModule() {
 
       {/* Tabs */}
       <div className="flex gap-1 bg-dark-800 p-1 rounded-xl w-fit border border-dark-700/50">
-        {(['general', 'receipt', 'system'] as const).map(t => (
+        {(['general', 'receipt', 'loyalty', 'system', 'account'] as const).map(t => (
           <button key={t} onClick={() => setTab(t)} className={`px-5 py-2 rounded-lg text-sm font-medium capitalize transition-all ${tab === t ? 'bg-brand-500 text-white' : 'text-dark-300 hover:text-white'}`}>
             {t}
           </button>
@@ -117,6 +129,52 @@ export default function SettingsModule() {
         </div>
       )}
 
+      {tab === 'loyalty' && (
+        <div className="card space-y-5">
+          <h2 className="section-title">Loyalty Program Settings</h2>
+          <div className="space-y-6">
+            <div>
+              <label className="block text-sm text-dark-300 mb-1.5">Stamp Reward Threshold</label>
+              <input
+                type="number"
+                value={f('loyalty_reward_threshold')}
+                onChange={e => set('loyalty_reward_threshold', e.target.value)}
+                className="input-field w-32"
+                min="1"
+              />
+              <p className="text-xs text-dark-500 mt-1">Number of stamps required to get a free reward (e.g., 10 stamps)</p>
+            </div>
+
+            <div className="pt-4 border-t border-dark-700/50">
+              <label className="block text-sm text-white font-semibold mb-3">Eligible Categories</label>
+              <p className="text-xs text-dark-400 mb-4">Select categories that earn stamps (e.g., Hot Coffee, Cold Drinks)</p>
+              <div className="grid grid-cols-2 gap-3">
+                {categories.map(cat => {
+                  const eligible = JSON.parse(f('loyalty_eligible_categories') || '[]');
+                  const isChecked = eligible.includes(cat.id);
+                  return (
+                    <label key={cat.id} className="flex items-center gap-3 p-3 bg-dark-800/50 rounded-xl border border-white/5 cursor-pointer hover:border-brand-500/30 transition-all">
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={() => {
+                          const next = isChecked 
+                            ? eligible.filter((id: number) => id !== cat.id)
+                            : [...eligible, cat.id];
+                          set('loyalty_eligible_categories', JSON.stringify(next));
+                        }}
+                        className="w-4 h-4 rounded border-dark-600 bg-dark-700 text-brand-500 focus:ring-brand-500/50"
+                      />
+                      <span className="text-sm font-medium text-dark-200">{cat.name}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {tab === 'system' && (
         <div className="card space-y-5">
           <h2 className="section-title">System Settings</h2>
@@ -151,10 +209,76 @@ export default function SettingsModule() {
               Application Info
             </h3>
             <div className="space-y-2 text-sm text-dark-400">
-              <p>Version: <span className="text-white">1.0.0</span></p>
+              <p>Version: <span className="text-white">1.0.6</span></p>
               <p>Database: <span className="text-white">SQLite (Local)</span></p>
               <p>Framework: <span className="text-white">Electron + React + TypeScript</span></p>
               <p>Future-ready for: <span className="text-white">Multi-tenant SaaS, Cloud sync</span></p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {tab === 'account' && (
+        <div className="card space-y-5">
+          <h2 className="section-title">Account Security</h2>
+          <div className="space-y-4 max-w-sm">
+            <div>
+              <label className="block text-sm text-dark-300 mb-1.5">Logged in as</label>
+              <div className="text-white font-medium bg-dark-800 p-3 rounded-xl border border-dark-700/50">
+                {user?.full_name} ({user?.email || user?.username})
+              </div>
+            </div>
+            
+            <div className="pt-4 border-t border-dark-700/50">
+              <h3 className="font-medium text-white mb-4">Change Password</h3>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm text-dark-300 mb-1.5">New Password</label>
+                  <input
+                    type="password"
+                    value={newPassword}
+                    onChange={e => setNewPassword(e.target.value)}
+                    className="input-field"
+                    placeholder="Enter new password"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm text-dark-300 mb-1.5">Confirm New Password</label>
+                  <input
+                    type="password"
+                    value={confirmPassword}
+                    onChange={e => setConfirmPassword(e.target.value)}
+                    className="input-field"
+                    placeholder="Confirm new password"
+                  />
+                </div>
+                <button
+                  onClick={async () => {
+                    if (!newPassword || newPassword.length < 6) return toast.error('Password must be at least 6 characters');
+                    if (newPassword !== confirmPassword) return toast.error('Passwords do not match');
+                    if (!user?.id) return toast.error('User not identified');
+
+                    setChangingPwd(true);
+                    try {
+                      const res = await window.electronAPI.users.changePassword(user.id, newPassword);
+                      if (res.success) {
+                        toast.success('Password changed successfully!');
+                        setNewPassword('');
+                        setConfirmPassword('');
+                      } else {
+                        toast.error(res.message || 'Failed to change password');
+                      }
+                    } catch (error: any) {
+                      toast.error('Error changing password');
+                    }
+                    setChangingPwd(false);
+                  }}
+                  disabled={changingPwd || !newPassword || !confirmPassword}
+                  className="btn-primary w-full justify-center"
+                >
+                  {changingPwd ? 'Updating...' : 'Update Password'}
+                </button>
+              </div>
             </div>
           </div>
         </div>

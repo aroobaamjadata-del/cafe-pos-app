@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import {
   AlertTriangle, Plus, ArrowDown, ArrowUp, RotateCcw, Truck,
-  Package, FlaskConical, TrendingDown
+  Package, FlaskConical, TrendingDown, Trash2, Edit2
 } from 'lucide-react';
 import { Ingredient, IngredientMovement, Supplier } from '../../types';
 import toast from 'react-hot-toast';
@@ -37,6 +37,28 @@ export default function InventoryModule() {
     setMovements(movs);
     setSuppliers(sups);
     setLoading(false);
+  };
+
+  const deleteIngredient = async (id: number) => {
+    if (!window.confirm('Are you sure you want to delete this ingredient? This action cannot be undone.')) return;
+    try {
+      await window.electronAPI.ingredients.delete(id);
+      toast.success('Ingredient deleted');
+      loadAll();
+    } catch (err) {
+      toast.error('Failed to delete ingredient');
+    }
+  };
+
+  const deleteSupplier = async (id: number) => {
+    if (!window.confirm('Are you sure you want to delete this supplier? Any linked ingredients will remain but will be unlinked.')) return;
+    try {
+      await window.electronAPI.suppliers.delete(id);
+      toast.success('Supplier deleted');
+      loadAll();
+    } catch (err) {
+      toast.error('Failed to delete supplier');
+    }
   };
 
   const lowCount = ingredients.filter(i => i.current_stock <= i.reorder_level).length;
@@ -137,7 +159,10 @@ export default function InventoryModule() {
                             <RotateCcw size={13} />
                           </button>
                           <button onClick={() => setIngredientModal({ open: true, ingredient: ing })} className="p-1.5 rounded-lg hover:bg-blue-500/10 hover:text-blue-400 text-dark-400 transition-all" title="Edit">
-                            <ArrowUp size={13} />
+                            <Edit2 size={13} />
+                          </button>
+                          <button onClick={() => deleteIngredient(ing.id)} className="p-1.5 rounded-lg hover:bg-red-500/10 hover:text-red-400 text-dark-400 transition-all" title="Delete">
+                            <Trash2 size={13} />
                           </button>
                         </div>
                       </td>
@@ -220,9 +245,14 @@ export default function InventoryModule() {
                     <p className="font-semibold text-white">{sup.name}</p>
                     {sup.contact_person && <p className="text-sm text-dark-400">{sup.contact_person}</p>}
                   </div>
-                  <button className="p-1.5 text-dark-400 hover:text-brand-400 hover:bg-brand-500/10 rounded-lg transition-all" onClick={() => setSupplierModal({ open: true, supplier: sup })}>
-                    <ArrowUp size={13} />
-                  </button>
+                  <div className="flex items-center gap-1">
+                    <button className="p-1.5 text-dark-400 hover:text-blue-400 hover:bg-blue-500/10 rounded-lg transition-all" onClick={() => setSupplierModal({ open: true, supplier: sup })} title="Edit">
+                      <Edit2 size={13} />
+                    </button>
+                    <button className="p-1.5 text-dark-400 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-all" onClick={() => deleteSupplier(sup.id)} title="Delete">
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
                 </div>
                 {sup.phone && <p className="text-xs text-dark-400 mt-2">📞 {sup.phone}</p>}
                 {sup.email && <p className="text-xs text-dark-400">✉ {sup.email}</p>}

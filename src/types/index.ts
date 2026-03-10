@@ -37,7 +37,6 @@ export interface Product {
   price: number;
   cost_price: number;
   tax_rate: number;
-  image?: string;
   is_active: number;
   track_inventory: number;
   stock?: number;
@@ -45,6 +44,18 @@ export interface Product {
   unit?: string;
   has_recipe?: boolean;
   recipe_count?: number;
+  created_at: string;
+  variants?: ProductVariant[];
+}
+
+export interface ProductVariant {
+  id: number;
+  product_id: number;
+  name: string;
+  sku?: string;
+  price: number;
+  cost_price: number;
+  is_active: number;
   created_at: string;
 }
 
@@ -105,7 +116,9 @@ export interface SelectedModifier {
 
 export interface CartItem {
   product_id: number;
+  variant_id?: number;
   product_name: string;
+  variant_name?: string;
   unit_price: number;
   quantity: number;
   discount_percent: number;
@@ -148,7 +161,9 @@ export interface OrderItem {
   id: number;
   order_id: number;
   product_id: number;
+  variant_id?: number;
   product_name: string;
+  variant_name?: string;
   unit_price: number;
   quantity: number;
   discount_percent: number;
@@ -265,6 +280,29 @@ export interface Settings {
   backup_frequency_days: string;
   theme: string;
   receipt_print_on_sale: string;
+  loyalty_reward_threshold: string;
+  loyalty_eligible_categories: string;
+  loyalty_eligible_products: string;
+}
+
+export interface LoyaltyCard {
+  id: number;
+  customer_id: number;
+  loyalty_code: string;
+  stamps: number;
+  reward_threshold: number;
+  customer_name?: string;
+  customer_phone?: string;
+  created_at: string;
+}
+
+export interface LoyaltyTransaction {
+  id: number;
+  customer_id: number;
+  order_id?: number;
+  stamps_added: number;
+  reward_redeemed: number;
+  created_at: string;
 }
 
 // ─── Dashboard & Reports ──────────────────────────────────────────────────────

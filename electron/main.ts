@@ -8,6 +8,7 @@ import log from 'electron-log';
 import { runActivationFlow } from './activationFlow';
 import { bootApplication } from './startupLogic';
 import { startBackgroundSyncLayer } from './syncWorker';
+import { staffLogin, setupStaffPassword, checkUserEmail, validateResetCredentials, performPasswordReset } from './staffLogin';
 
 // Setup logging for auto-updater
 log.transports.file.level = 'info';
@@ -157,8 +158,15 @@ ipcMain.handle('window:close', () => mainWindow?.close());
 // ─── Database IPC Bridge ─────────────────────────────────────────────────────
 
 // Auth
-ipcMain.handle('auth:login', (_e, username: string, password: string) =>
-  db.auth.login(username, password));
+ipcMain.handle('auth:login', (_e, identifier: string, password: string) =>
+  staffLogin(identifier, password, db));
+ipcMain.handle('auth:setupPassword', (_e, email: string, password: string) =>
+  setupStaffPassword(email, password, db));
+ipcMain.handle('auth:checkUser', (_e, email: string) => checkUserEmail(email, db));
+ipcMain.handle('auth:validateReset', (_e, licenseKey: string, tenantCode: string) => 
+  validateResetCredentials(licenseKey, tenantCode));
+ipcMain.handle('auth:performReset', (_e, tenantCode: string, newPass: string) => 
+  performPasswordReset(tenantCode, newPass, db));
 ipcMain.handle('auth:logout', () => db.auth.logout());
 
 // Users
@@ -244,6 +252,15 @@ ipcMain.handle('suppliers:delete', (_e, id: number) => db.suppliers.delete(id));
 ipcMain.handle('customers:getAll', () => db.customers.getAll());
 ipcMain.handle('customers:create', (_e, data: any) => db.customers.create(data));
 ipcMain.handle('customers:update', (_e, id: number, data: any) => db.customers.update(id, data));
+ipcMain.handle('customers:delete', (_e, id: number) => db.customers.delete(id));
+
+// Loyalty
+ipcMain.handle('loyalty:getCardByCode', (_e, code: string) => db.loyalty.getCardByCode(code));
+ipcMain.handle('loyalty:createCard', (_e, customerId: number, code: string) => db.loyalty.createCard(customerId, code));
+ipcMain.handle('loyalty:getCardByCustomerId', (_e, customerId: number) => db.loyalty.getCardByCustomerId(customerId));
+ipcMain.handle('loyalty:addStamps', (_e, customerId: number, stamps: number, orderId?: number) => db.loyalty.addStamps(customerId, stamps, orderId));
+ipcMain.handle('loyalty:redeemReward', (_e, customerId: number, orderId?: number) => db.loyalty.redeemReward(customerId, orderId));
+ipcMain.handle('loyalty:getTransactions', (_e, customerId: number) => db.loyalty.getTransactions(customerId));
 
 // Expenses
 ipcMain.handle('expenses:getAll', () => db.expenses.getAll());

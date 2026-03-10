@@ -11,6 +11,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Auth
   auth: {
     login: (username: string, password: string) => ipcRenderer.invoke('auth:login', username, password),
+    setupPassword: (email: string, password: string) => ipcRenderer.invoke('auth:setupPassword', email, password),
+    checkUser: (email: string) => ipcRenderer.invoke('auth:checkUser', email),
+    validateReset: (licenseKey: string, tenantCode: string) => ipcRenderer.invoke('auth:validateReset', licenseKey, tenantCode),
+    performReset: (tenantCode: string, newPass: string) => ipcRenderer.invoke('auth:performReset', tenantCode, newPass),
     logout: () => ipcRenderer.invoke('auth:logout'),
   },
 
@@ -111,6 +115,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getAll: () => ipcRenderer.invoke('customers:getAll'),
     create: (data: any) => ipcRenderer.invoke('customers:create', data),
     update: (id: number, data: any) => ipcRenderer.invoke('customers:update', id, data),
+    delete: (id: number) => ipcRenderer.invoke('customers:delete', id),
+  },
+
+  // Loyalty
+  loyalty: {
+    getCardByCode: (code: string) => ipcRenderer.invoke('loyalty:getCardByCode', code),
+    createCard: (customerId: number, code: string) => ipcRenderer.invoke('loyalty:createCard', customerId, code),
+    getCardByCustomerId: (customerId: number) => ipcRenderer.invoke('loyalty:getCardByCustomerId', customerId),
+    addStamps: (customerId: number, stamps: number, orderId?: number) => ipcRenderer.invoke('loyalty:addStamps', customerId, stamps, orderId),
+    redeemReward: (customerId: number, orderId?: number) => ipcRenderer.invoke('loyalty:redeemReward', customerId, orderId),
+    getTransactions: (customerId: number) => ipcRenderer.invoke('loyalty:getTransactions', customerId),
   },
 
   // Expenses

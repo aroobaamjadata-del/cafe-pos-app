@@ -7,6 +7,7 @@ export interface ElectronAPI {
   };
   auth: {
     login: (username: string, password: string) => Promise<any>;
+    setupPassword: (email: string, password: string) => Promise<any>;
     logout: () => Promise<any>;
   };
   users: {
@@ -82,6 +83,15 @@ export interface ElectronAPI {
     getAll: () => Promise<any[]>;
     create: (data: any) => Promise<any>;
     update: (id: number, data: any) => Promise<any>;
+    delete: (id: number) => Promise<any>;
+  };
+  loyalty: {
+    getCardByCode: (code: string) => Promise<any>;
+    createCard: (customerId: number, code: string) => Promise<any>;
+    getCardByCustomerId: (customerId: number) => Promise<any>;
+    addStamps: (customerId: number, stamps: number, orderId?: number) => Promise<any>;
+    redeemReward: (customerId: number, orderId?: number) => Promise<any>;
+    getTransactions: (customerId: number) => Promise<any[]>;
   };
   expenses: {
     getAll: () => Promise<any[]>;

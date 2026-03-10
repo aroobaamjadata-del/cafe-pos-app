@@ -218,12 +218,41 @@ function ProductFormModal({ product, categories, onClose, onSaved }: any) {
     track_inventory: product?.track_inventory !== 0,
     min_quantity: product?.min_quantity || 5,
     unit: product?.unit || 'pcs',
-    initial_stock: 0,
+    initial_stock: '',
+    add_stock: 0,
+    current_stock: product?.stock || 0,
   });
+
+  const [variants, setVariants] = useState<any[]>(product?.variants || []);
+
+  const handleAddVariant = () => setVariants([...variants, { name: '', price: '', sku: '' }]);
+  const updateVariant = (index: number, field: string, value: any) => {
+    const newVariants = [...variants];
+    newVariants[index][field] = value;
+    setVariants(newVariants);
+  };
+  const removeVariant = (index: number) => {
+    setVariants(variants.filter((_, i) => i !== index));
+  };
 
   const handleSave = async () => {
     if (!form.name || !form.price) { toast.error('Name and price are required'); return; }
-    const data = { ...form, price: Number(form.price), cost_price: Number(form.cost_price), category_id: Number(form.category_id) };
+    
+    // Ensure all variants have a name and price
+    for (const v of variants) {
+      if (!v.name || !v.price) { toast.error('All variants must have a name and price'); return; }
+      v.price = Number(v.price);
+    }
+
+    const data = { 
+      ...form, 
+      price: Number(form.price), 
+      cost_price: Number(form.cost_price), 
+      category_id: Number(form.category_id),
+      initial_stock: form.initial_stock === '' ? 0 : Number(form.initial_stock),
+      add_stock: Number(form.add_stock),
+      variants 
+    };
     if (isEdit) {
       await window.electronAPI.products.update(product.id, data);
       toast.success('Product updated');
@@ -276,8 +305,26 @@ function ProductFormModal({ product, categories, onClose, onSaved }: any) {
           {!isEdit && (
             <div>
               <label className="block text-sm text-dark-300 mb-1.5">Initial Stock</label>
-              <input type="number" value={form.initial_stock} onChange={e => setForm(f => ({...f, initial_stock: Number(e.target.value)}))} className="input-field" />
+              <input type="number" value={form.initial_stock} onChange={e => setForm(f => ({...f, initial_stock: e.target.value}))} className="input-field" placeholder="0" />
             </div>
+          )}
+          {isEdit && form.track_inventory && (
+             <div className="flex gap-4 col-span-2 bg-dark-800/50 p-3 rounded-xl border border-dark-600/50">
+                <div className="flex-1">
+                   <label className="block text-xs font-bold text-dark-400 uppercase tracking-wider mb-1">Current Stock</label>
+                   <div className="text-xl font-bold text-white px-1 leading-none">{form.current_stock} <span className="text-[10px] text-dark-400 uppercase tracking-widest">{form.unit}</span></div>
+                </div>
+                <div className="flex-1">
+                   <label className="block text-xs font-bold text-brand-400 uppercase tracking-wider mb-1">Add to Stock (+)</label>
+                   <input 
+                      type="number" 
+                      value={form.add_stock} 
+                      onChange={e => setForm(f => ({...f, add_stock: Number(e.target.value)}))} 
+                      className="w-full bg-dark-700 border border-brand-500/20 focus:border-brand-500 rounded-lg px-3 py-1.5 outline-none text-white text-sm font-bold" 
+                      placeholder="Enter amount to add..." 
+                   />
+                </div>
+             </div>
           )}
         </div>
 
@@ -295,6 +342,54 @@ function ProductFormModal({ product, categories, onClose, onSaved }: any) {
             <input type="checkbox" checked={form.track_inventory} onChange={e => setForm(f => ({...f, track_inventory: e.target.checked}))} className="w-4 h-4 accent-brand-500" />
             <span className="text-sm text-dark-200">Track Inventory</span>
           </label>
+        </div>
+
+        {/* Variants Section */}
+        <div className="pt-4 border-t border-dark-700/50">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="font-semibold text-white text-sm">Product Variants</h3>
+            <button onClick={handleAddVariant} className="text-xs text-brand-400 hover:text-brand-300 flex items-center gap-1 font-medium transition-colors">
+              <Plus size={14} /> Add Variant
+            </button>
+          </div>
+          
+          {variants.length > 0 && (
+            <div className="bg-dark-800 border border-dark-600/50 rounded-xl overflow-hidden mb-2">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-dark-700/50 text-dark-300">
+                  <tr>
+                    <th className="px-3 py-2 font-medium">Variant Name *</th>
+                    <th className="px-3 py-2 font-medium">Price *</th>
+                    <th className="px-3 py-2 font-medium">SKU</th>
+                    <th className="px-3 py-2 w-10"></th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-dark-600/50">
+                  {variants.map((v, i) => (
+                    <tr key={i} className="hover:bg-dark-700/30 transition-colors">
+                      <td className="px-2 py-2">
+                        <input value={v.name} onChange={e => updateVariant(i, 'name', e.target.value)} className="w-full bg-transparent border border-dark-600 focus:border-brand-500 rounded px-2 py-1 outline-none text-white text-xs placeholder-dark-500" placeholder="e.g. 6 pcs" />
+                      </td>
+                      <td className="px-2 py-2">
+                        <input type="number" value={v.price} onChange={e => updateVariant(i, 'price', e.target.value)} className="w-full bg-transparent border border-dark-600 focus:border-brand-500 rounded px-2 py-1 outline-none text-white text-xs placeholder-dark-500" placeholder="0.00" />
+                      </td>
+                      <td className="px-2 py-2">
+                        <input value={v.sku || ''} onChange={e => updateVariant(i, 'sku', e.target.value)} className="w-full bg-transparent border border-dark-600 focus:border-brand-500 rounded px-2 py-1 outline-none text-white text-xs placeholder-dark-500" placeholder="SKU" />
+                      </td>
+                      <td className="px-2 py-2 text-center">
+                        <button onClick={() => removeVariant(i)} className="text-dark-500 hover:text-red-400 transition-colors p-1" title="Remove Variant">
+                          <Trash2 size={14} />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {variants.length === 0 && (
+             <p className="text-xs text-dark-400 italic">No variants. The main product price will be used.</p>
+          )}
         </div>
 
         <div className="flex gap-3 pt-2">
@@ -339,11 +434,24 @@ function CategoryFormModal({ category, onClose, onSaved }: any) {
       <div className="space-y-4">
         <div>
           <label className="block text-sm text-dark-300 mb-1.5">Category Name *</label>
-          <input value={form.name} onChange={e => setForm(f => ({...f, name: e.target.value}))} className="input-field" placeholder="e.g. Hot Drinks" />
+          <input 
+             type="text"
+             autoFocus
+             value={form.name} 
+             onChange={e => setForm(f => ({...f, name: e.target.value}))} 
+             className="input-field" 
+             placeholder="e.g. Hot Drinks" 
+          />
         </div>
         <div>
           <label className="block text-sm text-dark-300 mb-1.5">Description</label>
-          <input value={form.description} onChange={e => setForm(f => ({...f, description: e.target.value}))} className="input-field" placeholder="Brief description..." />
+          <input 
+             type="text"
+             value={form.description} 
+             onChange={e => setForm(f => ({...f, description: e.target.value}))} 
+             className="input-field" 
+             placeholder="Brief description..." 
+          />
         </div>
         <div>
           <label className="block text-sm text-dark-300 mb-2">Color</label>

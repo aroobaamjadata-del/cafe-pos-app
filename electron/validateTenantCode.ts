@@ -1,43 +1,89 @@
-import { supabase } from './supabaseClient';
+import { createIsolatedSupabaseClient } from './supabase';
+import { cacheTenantLocal } from './sqliteDatabase';
 
+/**
+ * Validates a tenant code or license key against Supabase.
+ * If valid, caches the tenant data locally in SQLite for offline booting.
+ */
 export const validateTenantCode = async (codeOrKey: string) => {
+  const supabase = createIsolatedSupabaseClient(); 
+
   try {
-    // 1. First, try checking the 'licenses' table (using the key as license_key)
+    console.log(`[ACTIVATION] Validating activation string: ${codeOrKey}`);
+
+    // 1. Try treating it as a LICENSE KEY first
     const { data: license, error: licErr } = await supabase
       .from('licenses')
-      .select(`id, license_key, status, expires_at, features, current_activations, max_activations, tenant:tenants(id, business_name, tenant_code, status)`)
+      .select(`
+        id, 
+        status, 
+        expires_at, 
+        features, 
+        tenant:tenants(id, business_name, tenant_code, status)
+      `)
       .eq('license_key', codeOrKey)
       .maybeSingle();
 
     if (!licErr && license) {
-      if (license.status !== 'active') return { success: false, error: 'License is not active.' };
-      if (license.expires_at && new Date(license.expires_at) < new Date()) return { success: false, error: 'License has expired.' };
+      if (license.status !== 'active') return { success: false, error: 'License key is disabled.' };
+      if (license.expires_at && new Date(license.expires_at) < new Date()) {
+          return { success: false, error: 'License key has expired.' };
+      }
       
       const tenant = Array.isArray(license.tenant) ? license.tenant[0] : license.tenant;
-      if (!tenant) return { success: false, error: 'Tenant not found for this license.' };
-      if (tenant.status !== 'active') return { success: false, error: 'Tenant account is inactive.' };
-      
-      return { success: true, tenant };
+      if (!tenant || tenant.status !== 'active') {
+          return { success: false, error: 'Associated tenant account is inactive.' };
+      }
+
+      // Map 'business_name' to the name property correctly, or just save it.
+      const tenantToCache = { 
+          id: tenant.id, 
+          name: tenant.business_name || (tenant as any).name, 
+          tenant_code: tenant.tenant_code, 
+          status: tenant.status 
+      };
+
+      // Success: Cache locally
+      cacheTenantLocal(tenantToCache);
+
+      return { success: true, tenant: tenantToCache, source: 'license_key' };
     }
 
-    // 2. Fallback: treat the input directly as a tenant_code
+    // 2. Try treating it as a TENANT CODE directly
     const { data: tenant, error: tenErr } = await supabase
       .from('tenants')
-      .select('id, business_name, tenant_code, status, created_at')
+      .select('id, business_name, tenant_code, status')
       .eq('tenant_code', codeOrKey)
       .maybeSingle();
 
-    if (tenErr) throw tenErr;
-    if (!tenant) return { success: false, error: 'Invalid license key or tenant code.' };
-    if (tenant.status !== 'active') return { success: false, error: 'Tenant account is inactive.' };
+    if (!tenErr && tenant) {
+      if (tenant.status !== 'active') return { success: false, error: 'Tenant account is inactive.' };
 
-    return { success: true, tenant };
+      const tenantToCache = { 
+          id: tenant.id, 
+          name: tenant.business_name || (tenant as any).name, 
+          tenant_code: tenant.tenant_code, 
+          status: tenant.status 
+      };
+
+      // Success: Cache locally
+      cacheTenantLocal(tenantToCache);
+
+      return { success: true, tenant: tenantToCache, source: 'tenant_code' };
+    }
+
+    // If both failed
+    if (licErr || tenErr) {
+        console.error('[ACTIVATION] Error:', licErr || tenErr);
+    }
+    
+    return { success: false, error: 'Invalid activation code or license key.' };
 
   } catch (err: any) {
-    // Handling the exact "fetch failed" Node.js error 
-    if (err.message?.includes('fetch failed') || err.message?.includes('Network request failed')) {
-      return { success: false, error: 'Network error: Cannot reach server to validate.' };
+    console.error('[ACTIVATION] Exception:', err.message);
+    if (err.message?.includes('fetch failed')) {
+      return { success: false, error: 'Network error. Please check your internet connection.' };
     }
-    return { success: false, error: `Validation failed: ${err.message}` };
+    return { success: false, error: 'Activation failed. Please try again later.' };
   }
 };

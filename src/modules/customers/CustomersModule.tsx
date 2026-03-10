@@ -4,11 +4,13 @@ import { Customer } from '../../types';
 import toast from 'react-hot-toast';
 import Modal from '../../components/ui/Modal';
 import { useAppStore } from '../../store/appStore';
+import LoyaltyCardModal from './LoyaltyCardModal';
 
 export default function CustomersModule() {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState<{ open: boolean; customer?: Customer }>({ open: false });
+  const [loyaltyModal, setLoyaltyModal] = useState<{ open: boolean; customer?: Customer }>({ open: false });
   const [search, setSearch] = useState('');
   const settings = useAppStore(s => s.settings);
   const currency = settings?.currency_symbol || '₨';
@@ -78,9 +80,14 @@ export default function CustomersModule() {
                   )}
                 </div>
               </div>
-              <button onClick={() => setModal({ open: true, customer: c })} className="text-dark-400 hover:text-blue-400 opacity-0 group-hover:opacity-100 transition-all p-1">
-                <Edit2 size={14} />
-              </button>
+              <div className="flex gap-1">
+                <button onClick={() => setLoyaltyModal({ open: true, customer: c })} className="text-dark-400 hover:text-amber-400 opacity-0 group-hover:opacity-100 transition-all p-1">
+                  <Star size={14} />
+                </button>
+                <button onClick={() => setModal({ open: true, customer: c })} className="text-dark-400 hover:text-blue-400 opacity-0 group-hover:opacity-100 transition-all p-1">
+                  <Edit2 size={14} />
+                </button>
+              </div>
             </div>
             <div className="mt-3 grid grid-cols-2 gap-3">
               <div className="bg-dark-700/40 rounded-lg p-2 text-center">
@@ -98,6 +105,10 @@ export default function CustomersModule() {
 
       {modal.open && (
         <CustomerFormModal customer={modal.customer} onClose={() => setModal({ open: false })} onSaved={loadData} />
+      )}
+
+      {loyaltyModal.open && loyaltyModal.customer && (
+        <LoyaltyCardModal customer={loyaltyModal.customer} onClose={() => setLoyaltyModal({ open: false })} />
       )}
     </div>
   );

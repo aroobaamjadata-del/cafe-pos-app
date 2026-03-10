@@ -37,7 +37,7 @@ export const runActivationFlow = async (tenantCode: string, dbSvcParam?: Databas
 
   try {
     // 3. Store securely in local SQLite Cache
-    const tenantToCache = { ...tenant, name: tenant.business_name };
+    const tenantToCache = { ...tenant };
     cacheTenantLocal(tenantToCache);
     cacheDeviceLocal(registration.deviceId || '', registration.deviceName || '');
     
@@ -55,7 +55,7 @@ export const runActivationFlow = async (tenantCode: string, dbSvcParam?: Databas
         expiresAt: null,
         features: ['pos', 'inventory', 'reports'],
         tenantId: tenant.id,
-        cafeName: tenant.business_name,
+        cafeName: tenant.name,
         tenantCode: tenant.tenant_code,
         tenantStatus: tenant.status,
         subscriptionPlan: 'pro',
@@ -66,8 +66,8 @@ export const runActivationFlow = async (tenantCode: string, dbSvcParam?: Databas
 
     return { 
       success: true, 
-      tenant: tenant.business_name,
-      cafe_name: tenant.business_name, // the React App expects cafe_name
+      tenant: tenant.name,
+      cafe_name: tenant.name, // the React App expects cafe_name
       tenant_id: tenant.id, // and tenant_id
       mode: 'online',
       features: payload.features,

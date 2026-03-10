@@ -51,12 +51,18 @@ export class DatabaseService {
   public reports!: ReportsService;
   public settings!: SettingsService;
   public license!: LicenseService;
+  public loyalty!: LoyaltyService;
 
   initialize(): void {
     if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
     this.db = new Database(DB_PATH);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
+
+    // MIGRATIONS
+    try { this.db.exec('ALTER TABLE orders ADD COLUMN loyalty_redeemed INTEGER DEFAULT 0'); } catch(e){}
+    try { this.db.exec('ALTER TABLE orders ADD COLUMN loyalty_discount_amount REAL DEFAULT 0'); } catch(e){}
+    try { this.db.exec('ALTER TABLE orders ADD COLUMN customer_id INTEGER REFERENCES customers(id)'); } catch(e){}
     this.db.pragma('synchronous = NORMAL');
     this.db.pragma('cache_size = 10000');
     this.createSchema();
@@ -84,6 +90,7 @@ export class DatabaseService {
     this.settings = new SettingsService(this.db);
     this.license = new LicenseService(this.db);
     this.roles = new RolesService(this.db);
+    this.loyalty = new LoyaltyService(this.db);
   }
 
   public roles!: RolesService;
@@ -149,9 +156,21 @@ export class DatabaseService {
         price REAL NOT NULL DEFAULT 0,
         cost_price REAL DEFAULT 0,
         tax_rate REAL DEFAULT 0,
-        image TEXT,
         is_active INTEGER NOT NULL DEFAULT 1,
         track_inventory INTEGER DEFAULT 1,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        deleted_at DATETIME
+      );
+
+      CREATE TABLE IF NOT EXISTS product_variants (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        product_id INTEGER NOT NULL REFERENCES products(id),
+        name TEXT NOT NULL,
+        sku TEXT,
+        price REAL NOT NULL,
+        cost_price REAL DEFAULT 0,
+        is_active INTEGER DEFAULT 1,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         deleted_at DATETIME
@@ -223,7 +242,9 @@ export class DatabaseService {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         order_id INTEGER NOT NULL REFERENCES orders(id),
         product_id INTEGER NOT NULL REFERENCES products(id),
+        variant_id INTEGER REFERENCES product_variants(id),
         product_name TEXT NOT NULL,
+        variant_name TEXT,
         unit_price REAL NOT NULL,
         quantity REAL NOT NULL,
         discount_percent REAL DEFAULT 0,
@@ -383,6 +404,26 @@ export class DatabaseService {
         registered_at TEXT,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );
+
+      -- ── Loyalty System ──────────────────────────────────────────────────
+      CREATE TABLE IF NOT EXISTS loyalty_cards (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        customer_id INTEGER NOT NULL UNIQUE REFERENCES customers(id),
+        loyalty_code TEXT NOT NULL UNIQUE,
+        stamps INTEGER DEFAULT 0,
+        reward_threshold INTEGER DEFAULT 10,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS loyalty_transactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        customer_id INTEGER REFERENCES customers(id),
+        order_id INTEGER REFERENCES orders(id),
+        stamps_added INTEGER DEFAULT 0,
+        reward_redeemed INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
     `);
   }
 
@@ -398,72 +439,9 @@ export class DatabaseService {
       this.db.prepare(`INSERT INTO roles (name, permissions) VALUES (?,?)`).run('Cashier', cashierPerms);
     }
 
-    // Default admin user
-    const existingUsers = this.db.prepare('SELECT COUNT(*) as c FROM users').get() as any;
-    if (existingUsers.c === 0) {
-      const hash = bcrypt.hashSync('admin123', 10);
-      const adminRole = this.db.prepare('SELECT id FROM roles WHERE name = ?').get('Admin') as any;
-      this.db.prepare(`
-        INSERT INTO users (username, password_hash, full_name, email, role_id)
-        VALUES (?,?,?,?,?)
-      `).run('admin', hash, 'Administrator', 'admin@cloudncream.com', adminRole.id);
-    }
+    // Default admin user - REMOVED (Handled via Owner Activation logic)
 
-    // Default categories
-    const existingCats = this.db.prepare('SELECT COUNT(*) as c FROM categories').get() as any;
-    if (existingCats.c === 0) {
-      const cats = [
-        ['Hot Drinks', 'Coffees and teas', '#e25a26', 'coffee', 1],
-        ['Cold Drinks', 'Iced beverages', '#3b82f6', 'glass-water', 2],
-        ['Pastries', 'Fresh baked goods', '#f59e0b', 'cake', 3],
-        ['Sandwiches', 'Light meals', '#10b981', 'sandwich', 4],
-        ['Desserts', 'Sweet treats', '#ec4899', 'ice-cream', 5],
-        ['Extras', 'Add-ons and extras', '#8b5cf6', 'plus-circle', 6],
-      ];
-      for (const [name, desc, color, icon, sort] of cats) {
-        this.db.prepare(`INSERT INTO categories (name, description, color, icon, sort_order) VALUES (?,?,?,?,?)`).run(name, desc, color, icon, sort);
-      }
-    }
-
-    // Default products
-    const existingProds = this.db.prepare('SELECT COUNT(*) as c FROM products').get() as any;
-    if (existingProds.c === 0) {
-      const catMap = {} as Record<string, number>;
-      const cats = this.db.prepare('SELECT id, name FROM categories').all() as any[];
-      for (const c of cats) catMap[c.name] = c.id;
-
-      const products = [
-        ['Espresso', 'Rich single shot espresso', 'ESP001', catMap['Hot Drinks'], 250, 80, 0],
-        ['Cappuccino', 'Espresso with steamed milk foam', 'CAP001', catMap['Hot Drinks'], 380, 100, 0],
-        ['Latte', 'Espresso with creamy steamed milk', 'LAT001', catMap['Hot Drinks'], 400, 110, 0],
-        ['Americano', 'Espresso diluted with hot water', 'AME001', catMap['Hot Drinks'], 320, 90, 0],
-        ['Green Tea', 'Premium Japanese green tea', 'GT001', catMap['Hot Drinks'], 280, 60, 0],
-        ['Cold Brew', '24hr cold-steeped coffee', 'CB001', catMap['Cold Drinks'], 450, 120, 0],
-        ['Iced Latte', 'Latte served over ice', 'IL001', catMap['Cold Drinks'], 430, 115, 0],
-        ['Mango Smoothie', 'Fresh mango blend', 'MS001', catMap['Cold Drinks'], 380, 90, 0],
-        ['Croissant', 'Buttery flaky croissant', 'CRO001', catMap['Pastries'], 250, 80, 0],
-        ['Cinnamon Roll', 'Warm cinnamon roll with icing', 'CIN001', catMap['Pastries'], 320, 90, 0],
-        ['Blueberry Muffin', 'Fresh blueberry muffin', 'MUF001', catMap['Pastries'], 280, 75, 0],
-        ['Club Sandwich', 'Triple-decker club sandwich', 'CS001', catMap['Sandwiches'], 650, 200, 0],
-        ['Grilled Chicken', 'Grilled chicken with veggies', 'GC001', catMap['Sandwiches'], 580, 180, 0],
-        ['Chocolate Cake', 'Rich dark chocolate slice', 'CC001', catMap['Desserts'], 420, 130, 0],
-        ['Cheesecake', 'New York style cheesecake', 'CHK001', catMap['Desserts'], 480, 140, 0],
-        ['Extra Shot', 'Additional espresso shot', 'EX001', catMap['Extras'], 80, 20, 0],
-        ['Oat Milk', 'Plant-based milk alternative', 'OAT001', catMap['Extras'], 60, 15, 0],
-      ];
-
-      for (const [name, desc, sku, catId, price, cost, tax] of products) {
-        const result = this.db.prepare(`
-          INSERT INTO products (name, description, sku, category_id, price, cost_price, tax_rate)
-          VALUES (?,?,?,?,?,?,?)
-        `).run(name, desc, sku, catId, price, cost, tax);
-
-        this.db.prepare(`
-          INSERT INTO inventory (product_id, quantity, min_quantity, unit)
-          VALUES (?,?,?,?)
-        `).run(result.lastInsertRowid, 50, 10, 'pcs');
-      }
-    }
+    // Default categories & products - REMOVED for clean slate
 
     // Default settings
     const settingsExist = this.db.prepare('SELECT COUNT(*) as c FROM settings').get() as any;
@@ -482,107 +460,16 @@ export class DatabaseService {
         ['backup_frequency_days', '1'],
         ['theme', 'dark'],
         ['receipt_print_on_sale', '1'],
+        ['loyalty_reward_threshold', '10'],
+        ['loyalty_eligible_categories', '[]'],
+        ['loyalty_eligible_products', '[]'],
       ];
       for (const [key, value] of defaults) {
         this.db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?,?)').run(key, value);
       }
     }
 
-    // Default ingredients
-    const ingExist = this.db.prepare('SELECT COUNT(*) as c FROM ingredients').get() as any;
-    if (ingExist.c === 0) {
-      const ingredients = [
-        ['Espresso Beans',   'g',  5000,  500,  0.08],
-        ['Whole Milk',       'ml', 10000, 1000, 0.005],
-        ['Oat Milk',         'ml', 3000,  500,  0.009],
-        ['Water',            'ml', 50000, 5000, 0.0001],
-        ['Sugar',            'g',  3000,  300,  0.003],
-        ['Green Tea Leaves', 'g',  1000,  100,  0.05],
-        ['Vanilla Syrup',    'ml', 1000,  100,  0.02],
-        ['Caramel Syrup',    'ml', 1000,  100,  0.02],
-        ['Chocolate Sauce',  'ml', 800,   80,   0.03],
-        ['Ice',              'g',  20000, 2000, 0.001],
-        ['Mango Pulp',       'g',  2000,  200,  0.02],
-        ['Flour',            'g',  5000,  500,  0.002],
-        ['Butter',           'g',  2000,  200,  0.015],
-        ['Cream Cheese',     'g',  1000,  100,  0.05],
-        ['Blueberries',      'g',  500,   100,  0.04],
-        ['Chicken Breast',   'g',  3000,  300,  0.04],
-        ['Bread Loaf',       'pcs',20,    5,    15],
-        ['Cake Base',        'pcs',10,    2,    80],
-      ];
-      for (const [name, unit, stock, reorder, cost] of ingredients) {
-        this.db.prepare(
-          'INSERT INTO ingredients (name, unit, current_stock, reorder_level, cost_per_unit) VALUES (?,?,?,?,?)'
-        ).run(name, unit, stock, reorder, cost);
-      }
-
-      // Seed recipes for seeded products
-      const get = (n: string) => (this.db.prepare('SELECT id FROM ingredients WHERE name = ?').get(n) as any)?.id;
-      const getProd = (sku: string) => (this.db.prepare('SELECT id FROM products WHERE sku = ?').get(sku) as any)?.id;
-
-      const recipeMap: [string, [string, number][]][] = [
-        ['ESP001', [['Espresso Beans', 18], ['Water', 30]]],
-        ['CAP001', [['Espresso Beans', 18], ['Whole Milk', 120], ['Water', 30]]],
-        ['LAT001', [['Espresso Beans', 18], ['Whole Milk', 200], ['Water', 30], ['Sugar', 5]]],
-        ['AME001', [['Espresso Beans', 18], ['Water', 200]]],
-        ['GT001',  [['Green Tea Leaves', 3], ['Water', 250], ['Sugar', 5]]],
-        ['CB001',  [['Espresso Beans', 25], ['Water', 300], ['Ice', 150]]],
-        ['IL001',  [['Espresso Beans', 18], ['Whole Milk', 200], ['Ice', 120], ['Sugar', 5]]],
-        ['MS001',  [['Mango Pulp', 150], ['Whole Milk', 100], ['Ice', 100], ['Sugar', 10]]],
-        ['CRO001', [['Flour', 80], ['Butter', 40]]],
-        ['CIN001', [['Flour', 100], ['Butter', 30], ['Sugar', 20]]],
-        ['MUF001', [['Flour', 90], ['Butter', 25], ['Sugar', 20], ['Blueberries', 30]]],
-        ['CS001',  [['Bread Loaf', 3], ['Chicken Breast', 100], ['Butter', 10]]],
-        ['GC001',  [['Chicken Breast', 180], ['Butter', 15]]],
-        ['CC001',  [['Cake Base', 1], ['Chocolate Sauce', 30]]],
-        ['CHK001', [['Cake Base', 1], ['Cream Cheese', 80]]],
-      ];
-
-      const insertRecipe = this.db.prepare(
-        'INSERT OR IGNORE INTO recipes (product_id, ingredient_id, quantity, unit) VALUES (?,?,?,?)'
-      );
-      for (const [sku, ingredients2] of recipeMap) {
-        const pid = getProd(sku);
-        if (!pid) continue;
-        for (const [ingName, qty] of ingredients2) {
-          const iid = get(ingName);
-          if (!iid) continue;
-          const unit2 = (this.db.prepare('SELECT unit FROM ingredients WHERE id=?').get(iid) as any)?.unit;
-          insertRecipe.run(pid, iid, qty, unit2);
-        }
-      }
-
-      // Seed modifiers
-      const sizeMod = this.db.prepare('INSERT INTO modifiers (name, description, is_required) VALUES (?,?,?)').run('Size', 'Choose your cup size', 1);
-      const sizeId = sizeMod.lastInsertRowid as number;
-      this.db.prepare('INSERT INTO modifier_options (modifier_id, name, price_adjustment) VALUES (?,?,?)').run(sizeId, 'Small', -30);
-      this.db.prepare('INSERT INTO modifier_options (modifier_id, name, price_adjustment) VALUES (?,?,?)').run(sizeId, 'Medium', 0);
-      this.db.prepare('INSERT INTO modifier_options (modifier_id, name, price_adjustment) VALUES (?,?,?)').run(sizeId, 'Large', 50);
-
-      const milkMod = this.db.prepare('INSERT INTO modifiers (name, description) VALUES (?,?)').run('Milk Type', 'Milk alternative');
-      const milkId = milkMod.lastInsertRowid as number;
-      this.db.prepare('INSERT INTO modifier_options (modifier_id, name, price_adjustment) VALUES (?,?,?)').run(milkId, 'Whole Milk', 0);
-      this.db.prepare('INSERT INTO modifier_options (modifier_id, name, price_adjustment) VALUES (?,?,?)').run(milkId, 'Oat Milk', 60);
-      this.db.prepare('INSERT INTO modifier_options (modifier_id, name, price_adjustment) VALUES (?,?,?)').run(milkId, 'No Milk', -20);
-
-      const sugarMod = this.db.prepare('INSERT INTO modifiers (name, description) VALUES (?,?)').run('Sugar Level', 'Sweetness preference');
-      const sugarId = sugarMod.lastInsertRowid as number;
-      this.db.prepare('INSERT INTO modifier_options (modifier_id, name, price_adjustment) VALUES (?,?,?)').run(sugarId, 'No Sugar', 0);
-      this.db.prepare('INSERT INTO modifier_options (modifier_id, name, price_adjustment) VALUES (?,?,?)').run(sugarId, 'Less Sugar', 0);
-      this.db.prepare('INSERT INTO modifier_options (modifier_id, name, price_adjustment) VALUES (?,?,?)').run(sugarId, 'Normal Sugar', 0);
-      this.db.prepare('INSERT INTO modifier_options (modifier_id, name, price_adjustment) VALUES (?,?,?)').run(sugarId, 'Extra Sugar', 0);
-
-      // Link modifiers to coffee products
-      const coffeeSKUs = ['ESP001','CAP001','LAT001','AME001','CB001','IL001'];
-      for (const sku of coffeeSKUs) {
-        const pid = getProd(sku);
-        if (!pid) continue;
-        this.db.prepare('INSERT OR IGNORE INTO product_modifiers (product_id, modifier_id) VALUES (?,?)').run(pid, sizeId);
-        this.db.prepare('INSERT OR IGNORE INTO product_modifiers (product_id, modifier_id) VALUES (?,?)').run(pid, milkId);
-        this.db.prepare('INSERT OR IGNORE INTO product_modifiers (product_id, modifier_id) VALUES (?,?)').run(pid, sugarId);
-      }
-    }
+    // Default ingredients, recipes, and modifiers - REMOVED for clean slate
   }
 }
 
@@ -594,8 +481,8 @@ class AuthService {
     const user = this.db.prepare(`
       SELECT u.*, r.name as role_name, r.permissions
       FROM users u JOIN roles r ON u.role_id = r.id
-      WHERE u.username = ? AND u.is_active = 1 AND u.deleted_at IS NULL
-    `).get(username) as any;
+      WHERE (u.username = ? OR u.email = ?) AND u.is_active = 1 AND u.deleted_at IS NULL
+    `).get(username, username) as any;
 
     if (!user) return { success: false, message: 'Invalid credentials' };
     const valid = bcrypt.compareSync(password, user.password_hash);
@@ -644,17 +531,21 @@ class UsersService {
     `).all();
   }
 
+  getByEmail(email: string): any {
+    return this.db.prepare('SELECT * FROM users WHERE email = ? AND deleted_at IS NULL').get(email);
+  }
+
   create(data: any): any {
     const hash = bcrypt.hashSync(data.password, 10);
     const result = this.db.prepare(`
-      INSERT INTO users (username, password_hash, full_name, email, phone, role_id)
-      VALUES (?,?,?,?,?,?)
-    `).run(data.username, hash, data.full_name, data.email || null, data.phone || null, data.role_id);
+      INSERT INTO users (username, password_hash, full_name, email, phone, role_id, is_active)
+      VALUES (?,?,?,?,?,?,?)
+    `).run(data.username, hash, data.full_name, data.email || null, data.phone || null, data.role_id, data.is_active ? 1 : 0);
     
     try {
       const fullRow = this.db.prepare('SELECT * FROM users WHERE id=?').get(result.lastInsertRowid);
       enqueueSyncOperation('staff', 'INSERT', fullRow);
-    } catch(err) { console.error('Roles/Staff Sync Error', err); }
+    } catch (err) { console.error('Staff sync error:', err); }
 
     return { success: true, id: result.lastInsertRowid };
   }
@@ -668,7 +559,7 @@ class UsersService {
     try {
       const fullRow = this.db.prepare('SELECT * FROM users WHERE id=?').get(id);
       enqueueSyncOperation('staff', 'UPDATE', fullRow);
-    } catch(err) { console.error('Roles/Staff Sync Error', err); }
+    } catch(err) { console.error('Staff sync error:', err); }
 
     return { success: true };
   }
@@ -678,8 +569,8 @@ class UsersService {
 
     try {
       const fullRow = this.db.prepare('SELECT * FROM users WHERE id=?').get(id);
-      enqueueSyncOperation('staff', 'UPDATE', fullRow);
-    } catch(err) { console.error('Roles/Staff Sync Error', err); }
+      enqueueSyncOperation('staff', 'UPDATE', fullRow); // Soft delete is an update
+    } catch(err) { console.error('Staff sync error:', err); }
 
     return { success: true };
   }
@@ -691,7 +582,7 @@ class UsersService {
     try {
       const fullRow = this.db.prepare('SELECT * FROM users WHERE id=?').get(id);
       enqueueSyncOperation('staff', 'UPDATE', fullRow);
-    } catch(err) { console.error('Roles/Staff Sync Error', err); }
+    } catch(err) { console.error('Staff sync error:', err); }
 
     return { success: true };
   }
@@ -729,6 +620,12 @@ class CategoriesService {
       INSERT INTO categories (name, description, color, icon, sort_order)
       VALUES (?,?,?,?,?)
     `).run(data.name, data.description || null, data.color || '#e25a26', data.icon || 'coffee', data.sort_order || 0);
+    
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM categories WHERE id=?').get(result.lastInsertRowid);
+      enqueueSyncOperation('categories', 'INSERT', fullRow);
+    } catch (err) { console.error('Category sync error:', err); }
+
     return { success: true, id: result.lastInsertRowid };
   }
 
@@ -737,11 +634,23 @@ class CategoriesService {
       UPDATE categories SET name=?, description=?, color=?, icon=?, sort_order=?, is_active=?, updated_at=CURRENT_TIMESTAMP
       WHERE id=?
     `).run(data.name, data.description || null, data.color, data.icon, data.sort_order || 0, data.is_active ? 1 : 0, id);
+
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM categories WHERE id=?').get(id);
+      enqueueSyncOperation('categories', 'UPDATE', fullRow);
+    } catch (err) { console.error('Category sync error:', err); }
+
     return { success: true };
   }
 
   delete(id: number): any {
     this.db.prepare('UPDATE categories SET deleted_at=CURRENT_TIMESTAMP WHERE id=?').run(id);
+    
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM categories WHERE id=?').get(id);
+      enqueueSyncOperation('categories', 'UPDATE', fullRow); // Soft delete is an update
+    } catch (err) { console.error('Category sync error:', err); }
+
     return { success: true };
   }
 }
@@ -751,7 +660,7 @@ class ProductsService {
   constructor(private db: Database.Database) {}
 
   getAll(): any[] {
-    return this.db.prepare(`
+    const products = this.db.prepare(`
       SELECT p.*, c.name as category_name, c.color as category_color,
              i.quantity as stock, i.min_quantity, i.unit
       FROM products p
@@ -760,10 +669,16 @@ class ProductsService {
       WHERE p.deleted_at IS NULL
       ORDER BY c.sort_order, p.name
     `).all();
+
+    const variants = this.db.prepare('SELECT * FROM product_variants WHERE deleted_at IS NULL').all() as any[];
+    for (const p of products as any[]) {
+      p.variants = variants.filter(v => v.product_id === p.id);
+    }
+    return products;
   }
 
   getByCategory(categoryId: number): any[] {
-    return this.db.prepare(`
+    const products = this.db.prepare(`
       SELECT p.*, c.name as category_name, i.quantity as stock, i.min_quantity, i.unit
       FROM products p
       LEFT JOIN categories c ON p.category_id = c.id
@@ -771,11 +686,17 @@ class ProductsService {
       WHERE p.category_id = ? AND p.is_active = 1 AND p.deleted_at IS NULL
       ORDER BY p.name
     `).all(categoryId);
+
+    const variants = this.db.prepare('SELECT * FROM product_variants WHERE deleted_at IS NULL AND is_active = 1').all() as any[];
+    for (const p of products as any[]) {
+      p.variants = variants.filter(v => v.product_id === p.id);
+    }
+    return products;
   }
 
   search(query: string): any[] {
     const q = `%${query}%`;
-    return this.db.prepare(`
+    const products = this.db.prepare(`
       SELECT p.*, c.name as category_name, i.quantity as stock
       FROM products p
       LEFT JOIN categories c ON p.category_id = c.id
@@ -784,57 +705,140 @@ class ProductsService {
         AND p.is_active = 1 AND p.deleted_at IS NULL
       LIMIT 20
     `).all(q, q, q);
+
+    const variants = this.db.prepare('SELECT * FROM product_variants WHERE deleted_at IS NULL AND is_active = 1').all() as any[];
+    for (const p of products as any[]) {
+      p.variants = variants.filter(v => v.product_id === p.id);
+    }
+    return products;
   }
 
   create(data: any): any {
-    const result = this.db.prepare(`
-      INSERT INTO products (name, description, sku, category_id, price, cost_price, tax_rate, track_inventory)
-      VALUES (?,?,?,?,?,?,?,?)
-    `).run(data.name, data.description || null, data.sku || null, data.category_id, data.price, data.cost_price || 0, data.tax_rate || 0, data.track_inventory ? 1 : 0);
+    let resultId: number = 0;
+    this.db.transaction(() => {
+      const result = this.db.prepare(`
+        INSERT INTO products (name, description, sku, category_id, price, cost_price, tax_rate, track_inventory)
+        VALUES (?,?,?,?,?,?,?,?)
+      `).run(data.name, data.description || null, data.sku || null, data.category_id, data.price, data.cost_price || 0, data.tax_rate || 0, data.track_inventory ? 1 : 0);
+      resultId = result.lastInsertRowid as number;
 
-    if (data.track_inventory) {
-      this.db.prepare(`
-        INSERT INTO inventory (product_id, quantity, min_quantity, unit)
-        VALUES (?,?,?,?)
-      `).run(result.lastInsertRowid, data.initial_stock || 0, data.min_quantity || 5, data.unit || 'pcs');
-    }
+      if (data.track_inventory) {
+        const invResult = this.db.prepare(`
+          INSERT INTO inventory (product_id, quantity, min_quantity, unit)
+          VALUES (?,?,?,?)
+        `).run(resultId, data.initial_stock || 0, data.min_quantity || 5, data.unit || 'pcs');
 
-    try {
-      const fullRow = this.db.prepare('SELECT * FROM products WHERE id=?').get(result.lastInsertRowid);
-      enqueueSyncOperation('products', 'INSERT', fullRow);
-    } catch (err) {
-      console.error('Local sync queue failed:', err);
-    }
+        try {
+          const fullInv = this.db.prepare('SELECT * FROM inventory WHERE id=?').get(invResult.lastInsertRowid);
+          enqueueSyncOperation('inventory', 'INSERT', fullInv);
+        } catch (e) { console.error('Inventory sync error:', e); }
+      }
 
-    return { success: true, id: result.lastInsertRowid };
+      // Handle variants
+      if (data.variants && data.variants.length > 0) {
+        const insertVariant = this.db.prepare(
+          'INSERT INTO product_variants (product_id, name, sku, price, cost_price) VALUES (?, ?, ?, ?, ?)'
+        );
+        for (const v of data.variants) {
+          const vRes = insertVariant.run(resultId, v.name, v.sku || null, v.price, v.cost_price || 0);
+          try {
+            const vFull = this.db.prepare('SELECT * FROM product_variants WHERE id=?').get(vRes.lastInsertRowid);
+            enqueueSyncOperation('product_variants', 'INSERT', vFull);
+          } catch (e) { console.error('Variant sync error:', e); }
+        }
+      }
+
+      try {
+        const fullRow = this.db.prepare('SELECT * FROM products WHERE id=?').get(resultId);
+        enqueueSyncOperation('products', 'INSERT', fullRow);
+      } catch (err) {
+        console.error('Local sync queue failed:', err);
+      }
+    })();
+
+    return { success: true, id: resultId };
   }
 
   update(id: number, data: any): any {
-    this.db.prepare(`
-      UPDATE products SET name=?, description=?, sku=?, category_id=?, price=?, cost_price=?,
-             tax_rate=?, is_active=?, updated_at=CURRENT_TIMESTAMP WHERE id=?
-    `).run(data.name, data.description || null, data.sku || null, data.category_id, data.price, data.cost_price || 0, data.tax_rate || 0, data.is_active ? 1 : 0, id);
+    this.db.transaction(() => {
+      this.db.prepare(`
+        UPDATE products SET name=?, description=?, sku=?, category_id=?, price=?, cost_price=?,
+               tax_rate=?, is_active=?, updated_at=CURRENT_TIMESTAMP WHERE id=?
+      `).run(data.name, data.description || null, data.sku || null, data.category_id, data.price, data.cost_price || 0, data.tax_rate || 0, data.is_active ? 1 : 0, id);
 
-    if (data.min_quantity !== undefined) {
-      this.db.prepare('UPDATE inventory SET min_quantity=?, unit=? WHERE product_id=?').run(data.min_quantity, data.unit || 'pcs', id);
-    }
+      if (data.min_quantity !== undefined) {
+        this.db.prepare('UPDATE inventory SET min_quantity=?, unit=?, updated_at=CURRENT_TIMESTAMP WHERE product_id=?').run(data.min_quantity, data.unit || 'pcs', id);
+        
+        // If add_stock is provided, adjust the quantity
+        if (data.add_stock && data.add_stock !== 0) {
+          const inv = this.db.prepare('SELECT quantity FROM inventory WHERE product_id = ?').get(id) as any;
+          if (inv) {
+            const beforeQty = inv.quantity;
+            const afterQty = beforeQty + data.add_stock;
+            this.db.prepare('UPDATE inventory SET quantity=?, last_restocked=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE product_id=?').run(afterQty, id);
+            
+            // Log movement
+            this.db.prepare(`
+              INSERT INTO stock_movements (product_id, type, quantity, before_qty, after_qty, notes)
+              VALUES (?,?,?,?,?,?)
+            `).run(id, 'in', data.add_stock, beforeQty, afterQty, 'Stock added via Product Edit');
+          }
+        }
 
-    try {
-      const fullRow = this.db.prepare('SELECT * FROM products WHERE id=?').get(id);
-      enqueueSyncOperation('products', 'UPDATE', fullRow);
-    } catch (err) {
-      console.error('Local sync queue failed:', err);
-    }
+        try {
+          const fullInv = this.db.prepare('SELECT * FROM inventory WHERE product_id=?').get(id);
+          enqueueSyncOperation('inventory', 'UPDATE', fullInv);
+        } catch (e) { console.error('Inventory sync error:', e); }
+      }
+
+      // Sync product update
+      try {
+        const fullRow = this.db.prepare('SELECT * FROM products WHERE id=?').get(id);
+        enqueueSyncOperation('products', 'UPDATE', fullRow);
+      } catch (err) {
+        console.error('Local sync queue failed:', err);
+      }
+
+      // Handle variants update (simple replace strategy for now, or update if exists)
+      if (data.variants !== undefined) {
+        // Soft-delete existing variants not in the new list (or simply hard delete and recreate if no sales tied, but soft delete is safer)
+        const existingVariants = this.db.prepare('SELECT id FROM product_variants WHERE product_id=? AND deleted_at IS NULL').all(id) as {id: number}[];
+        this.db.prepare('UPDATE product_variants SET deleted_at=CURRENT_TIMESTAMP WHERE product_id=?').run(id);
+        for (const v of existingVariants) {
+          try {
+            const fullRow = this.db.prepare('SELECT * FROM product_variants WHERE id=?').get(v.id);
+            enqueueSyncOperation('product_variants', 'UPDATE', fullRow); // Soft delete is an update
+          } catch(e) { console.error('Variant sync error (delete):', e); }
+        }
+        
+        // Re-insert variants (in a real app you'd want to update existing by ID to keep order history linked properly)
+        const insertVariant = this.db.prepare(
+          'INSERT INTO product_variants (product_id, name, sku, price, cost_price) VALUES (?, ?, ?, ?, ?)'
+        );
+        for (const v of data.variants) {
+           const vRes = insertVariant.run(id, v.name, v.sku || null, v.price, v.cost_price || 0);
+           try {
+             const vFull = this.db.prepare('SELECT * FROM product_variants WHERE id=?').get(vRes.lastInsertRowid);
+             enqueueSyncOperation('product_variants', 'INSERT', vFull);
+           } catch(e) { console.error('Variant sync error (insert):', e); }
+        }
+      }
+    })();
 
     return { success: true };
   }
 
   delete(id: number): any {
     this.db.prepare('UPDATE products SET deleted_at=CURRENT_TIMESTAMP WHERE id=?').run(id);
+    this.db.prepare('UPDATE product_variants SET deleted_at=CURRENT_TIMESTAMP WHERE product_id=?').run(id);
 
     try {
       const fullRow = this.db.prepare('SELECT * FROM products WHERE id=?').get(id);
       enqueueSyncOperation('products', 'UPDATE', fullRow); // Note: Since it's a soft-delete (deleted_at), we treat it as an UPDATE for sync.
+      const deletedVariants = this.db.prepare('SELECT * FROM product_variants WHERE product_id=?').all(id);
+      for (const v of deletedVariants) {
+        enqueueSyncOperation('product_variants', 'UPDATE', v);
+      }
     } catch (err) {
       console.error('Local sync queue failed:', err);
     }
@@ -855,34 +859,49 @@ class OrdersService {
       const result = this.db.prepare(`
         INSERT INTO orders (order_number, customer_id, user_id, status, subtotal,
           discount_type, discount_value, discount_amount, tax_amount, total,
-          payment_method, amount_paid, change_amount, notes)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          payment_method, amount_paid, change_amount, notes,
+          loyalty_redeemed, loyalty_discount_amount)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       `).run(
         orderNumber, order.customer_id || null, order.user_id, 'completed',
         order.subtotal, order.discount_type || null, order.discount_value || 0,
         order.discount_amount || 0, order.tax_amount || 0, order.total,
-        order.payment_method, order.amount_paid, order.change_amount || 0, order.notes || null
+        order.payment_method, order.amount_paid, order.change_amount || 0, order.notes || null,
+        order.loyalty_redeemed ? 1 : 0, order.loyalty_discount_amount || 0
       );
 
       const orderId = result.lastInsertRowid as number;
 
       // Insert items, deduct product inventory AND recipe ingredients
       for (const item of order.items) {
-        this.db.prepare(`
-          INSERT INTO order_items (order_id, product_id, product_name, unit_price, quantity, discount_percent, tax_rate, line_total, notes)
-          VALUES (?,?,?,?,?,?,?,?,?)
-        `).run(orderId, item.product_id, item.product_name, item.unit_price, item.quantity,
+        const itemResult = this.db.prepare(`
+          INSERT INTO order_items (order_id, product_id, variant_id, product_name, variant_name, unit_price, quantity, discount_percent, tax_rate, line_total, notes)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        `).run(orderId, item.product_id, item.variant_id || null, item.product_name, item.variant_name || null, item.unit_price, item.quantity,
                item.discount_percent || 0, item.tax_rate || 0, item.line_total, item.notes || null);
+
+        try {
+          const fullItem = this.db.prepare('SELECT * FROM order_items WHERE id=?').get(itemResult.lastInsertRowid);
+          enqueueSyncOperation('order_items', 'INSERT', fullItem);
+        } catch (e) { console.error('Order item sync error:', e); }
 
         // ── Deduct product-level inventory (finished goods) ──────────
         const inv = this.db.prepare('SELECT quantity FROM inventory WHERE product_id = ?').get(item.product_id) as any;
         if (inv) {
           const newQty = Math.max(0, inv.quantity - item.quantity);
           this.db.prepare('UPDATE inventory SET quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE product_id = ?').run(newQty, item.product_id);
-          this.db.prepare(`
+          const movementRes = this.db.prepare(`
             INSERT INTO stock_movements (product_id, type, quantity, before_qty, after_qty, reference, user_id)
             VALUES (?,?,?,?,?,?,?)
           `).run(item.product_id, 'out', item.quantity, inv.quantity, newQty, orderNumber, order.user_id);
+          try {
+             const fullMov = this.db.prepare('SELECT * FROM stock_movements WHERE id=?').get(movementRes.lastInsertRowid);
+             enqueueSyncOperation('stock_movements', 'INSERT', fullMov);
+          } catch(e) {}
+          try {
+            const fullInv = this.db.prepare('SELECT * FROM inventory WHERE product_id=?').get(item.product_id);
+            enqueueSyncOperation('inventory', 'UPDATE', fullInv);
+          } catch (e) { console.error('Inventory sync error:', e); }
         }
 
         // ── Deduct recipe ingredients ────────────────────────────────
@@ -910,10 +929,18 @@ class OrdersService {
             this.db.prepare(
               'UPDATE ingredients SET current_stock=?, updated_at=CURRENT_TIMESTAMP WHERE id=?'
             ).run(afterQty, row.ingredient_id);
-            this.db.prepare(`
+            const movRes = this.db.prepare(`
               INSERT INTO ingredient_movements (ingredient_id, type, quantity, before_qty, after_qty, reference, user_id)
               VALUES (?,?,?,?,?,?,?)
             `).run(row.ingredient_id, 'usage', totalIngQty, beforeQty, afterQty, orderNumber, order.user_id);
+            try {
+               const fullMov = this.db.prepare('SELECT * FROM ingredient_movements WHERE id=?').get(movRes.lastInsertRowid);
+               enqueueSyncOperation('ingredient_movements', 'INSERT', fullMov);
+            } catch(e){}
+            try {
+              const fullIng = this.db.prepare('SELECT * FROM ingredients WHERE id=?').get(row.ingredient_id);
+              enqueueSyncOperation('ingredients', 'UPDATE', fullIng);
+            } catch (e) { console.error('Ingredient sync error:', e); }
           }
         }
       }
@@ -921,18 +948,34 @@ class OrdersService {
       // Insert payment(s)
       if (order.payments) {
         for (const p of order.payments) {
-          this.db.prepare('INSERT INTO payments (order_id, method, amount, reference) VALUES (?,?,?,?)').run(orderId, p.method, p.amount, p.reference || null);
+          const paymentResult = this.db.prepare('INSERT INTO payments (order_id, method, amount, reference) VALUES (?,?,?,?)').run(orderId, p.method, p.amount, p.reference || null);
+          try {
+            const fullPayment = this.db.prepare('SELECT * FROM payments WHERE id=?').get(paymentResult.lastInsertRowid);
+            enqueueSyncOperation('payments', 'INSERT', fullPayment);
+          } catch (e) { console.error('Payment sync error:', e); }
         }
       } else {
-        this.db.prepare('INSERT INTO payments (order_id, method, amount) VALUES (?,?,?)').run(orderId, order.payment_method, order.amount_paid);
+        const paymentResult = this.db.prepare('INSERT INTO payments (order_id, method, amount) VALUES (?,?,?)').run(orderId, order.payment_method, order.amount_paid);
+        try {
+          const fullPayment = this.db.prepare('SELECT * FROM payments WHERE id=?').get(paymentResult.lastInsertRowid);
+          enqueueSyncOperation('payments', 'INSERT', fullPayment);
+        } catch (e) { console.error('Payment sync error:', e); }
       }
 
       // Update customer stats
       if (order.customer_id) {
         this.db.prepare(`
-          UPDATE customers SET total_spent = total_spent + ?, loyalty_points = loyalty_points + ?
+          UPDATE customers SET total_spent = total_spent + ?, loyalty_points = loyalty_points + ?, updated_at=CURRENT_TIMESTAMP
           WHERE id = ?
         `).run(order.total, Math.floor(order.total / 100), order.customer_id);
+        try {
+          const fullCust = this.db.prepare('SELECT * FROM customers WHERE id=?').get(order.customer_id);
+          enqueueSyncOperation('customers', 'UPDATE', fullCust);
+        } catch (err) { console.error('Customer sync error:', err); }
+        try {
+          const fullCustomer = this.db.prepare('SELECT * FROM customers WHERE id=?').get(order.customer_id);
+          enqueueSyncOperation('customers', 'UPDATE', fullCustomer);
+        } catch (e) { console.error('Customer sync error:', e); }
       }
 
       // ─── OFFLINE SYNC QUEUE INJECTION ──────────────────────────────
@@ -1001,7 +1044,11 @@ class OrdersService {
       const inv = this.db.prepare('SELECT quantity FROM inventory WHERE product_id = ?').get(item.product_id) as any;
       if (inv) {
         const newQty = inv.quantity + item.quantity;
-        this.db.prepare('UPDATE inventory SET quantity = ? WHERE product_id = ?').run(newQty, item.product_id);
+        this.db.prepare('UPDATE inventory SET quantity = ?, updated_at=CURRENT_TIMESTAMP WHERE product_id = ?').run(newQty, item.product_id);
+        try {
+          const fullInv = this.db.prepare('SELECT * FROM inventory WHERE product_id=?').get(item.product_id);
+          enqueueSyncOperation('inventory', 'UPDATE', fullInv);
+        } catch (e) { console.error('Inventory sync error:', e); }
       }
       // Restore ingredient stock
       const recipeRows = this.db.prepare(
@@ -1012,15 +1059,23 @@ class OrdersService {
         const ing = this.db.prepare('SELECT current_stock FROM ingredients WHERE id=?').get(row.ingredient_id) as any;
         if (ing) {
           const after = ing.current_stock + totalQty;
-          this.db.prepare('UPDATE ingredients SET current_stock=? WHERE id=?').run(after, row.ingredient_id);
+          this.db.prepare('UPDATE ingredients SET current_stock=?, updated_at=CURRENT_TIMESTAMP WHERE id=?').run(after, row.ingredient_id);
           this.db.prepare(`
             INSERT INTO ingredient_movements (ingredient_id, type, quantity, before_qty, after_qty, reference)
             VALUES (?,?,?,?,?,?)
           `).run(row.ingredient_id, 'return', totalQty, ing.current_stock, after, orderRow?.order_number);
+          try {
+            const fullIng = this.db.prepare('SELECT * FROM ingredients WHERE id=?').get(row.ingredient_id);
+            enqueueSyncOperation('ingredients', 'UPDATE', fullIng);
+          } catch (e) { console.error('Ingredient sync error:', e); }
         }
       }
     }
     this.db.prepare(`UPDATE orders SET status='voided', void_reason=?, void_at=CURRENT_TIMESTAMP WHERE id=?`).run(reason, id);
+    try {
+      const fullOrder = this.db.prepare('SELECT * FROM orders WHERE id=?').get(id);
+      enqueueSyncOperation('orders', 'UPDATE', fullOrder);
+    } catch (err) { console.error('Order sync error:', err); }
     return { success: true };
   }
 }
@@ -1062,6 +1117,12 @@ class InventoryService {
     else afterQty = Math.max(0, beforeQty - qty);
 
     this.db.prepare('UPDATE inventory SET quantity=?, last_restocked=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE product_id=?').run(afterQty, productId);
+    
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM inventory WHERE product_id=?').get(productId);
+      enqueueSyncOperation('inventory', 'UPDATE', fullRow);
+    } catch (err) { console.error('Inventory sync error:', err); }
+
     this.db.prepare(`
       INSERT INTO stock_movements (product_id, type, quantity, before_qty, after_qty, notes)
       VALUES (?,?,?,?,?,?)
@@ -1112,6 +1173,12 @@ class IngredientsService {
       VALUES (?,?,?,?,?,?,?)
     `).run(data.name, data.unit || 'g', data.current_stock || 0, data.reorder_level || 100,
            data.cost_per_unit || 0, data.supplier_id || null, data.notes || null);
+    
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM ingredients WHERE id=?').get(r.lastInsertRowid);
+      enqueueSyncOperation('ingredients', 'INSERT', fullRow);
+    } catch (err) { console.error('Ingredient sync error:', err); }
+
     return { success: true, id: r.lastInsertRowid };
   }
 
@@ -1121,11 +1188,23 @@ class IngredientsService {
              updated_at=CURRENT_TIMESTAMP WHERE id=?
     `).run(data.name, data.unit, data.reorder_level, data.cost_per_unit || 0,
            data.supplier_id || null, data.notes || null, id);
+    
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM ingredients WHERE id=?').get(id);
+      enqueueSyncOperation('ingredients', 'UPDATE', fullRow);
+    } catch (err) { console.error('Ingredient sync error:', err); }
+
     return { success: true };
   }
 
   delete(id: number): any {
     this.db.prepare('UPDATE ingredients SET deleted_at=CURRENT_TIMESTAMP WHERE id=?').run(id);
+    
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM ingredients WHERE id=?').get(id);
+      enqueueSyncOperation('ingredients', 'UPDATE', fullRow); // Soft delete is an update
+    } catch (err) { console.error('Ingredient sync error:', err); }
+
     return { success: true };
   }
 
@@ -1142,6 +1221,12 @@ class IngredientsService {
       INSERT INTO ingredient_movements (ingredient_id, type, quantity, before_qty, after_qty, notes, user_id)
       VALUES (?,?,?,?,?,?,?)
     `).run(id, type, Math.abs(qty - (type === 'adjustment' ? before : 0) || qty), before, after, notes || null, userId || null);
+    
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM ingredients WHERE id=?').get(id);
+      enqueueSyncOperation('ingredients', 'UPDATE', fullRow);
+    } catch (err) { console.error('Ingredient sync error:', err); }
+
     return { success: true };
   }
 
@@ -1176,7 +1261,9 @@ class RecipesService {
 
   getAll(): any[] {
     return this.db.prepare(`
-      SELECT r.*, p.name as product_name, p.sku, ing.name as ingredient_name, ing.unit as ingredient_unit
+      SELECT r.*, p.name as product_name, p.sku, 
+             ing.name as ingredient_name, ing.unit as ingredient_unit,
+             ing.current_stock, ing.reorder_level
       FROM recipes r
       JOIN products p ON r.product_id = p.id
       JOIN ingredients ing ON r.ingredient_id = ing.id
@@ -1186,26 +1273,49 @@ class RecipesService {
   }
 
   upsert(productId: number, ingredientId: number, quantity: number, unit?: string): any {
-    this.db.prepare(`
+    const result = this.db.prepare(`
       INSERT INTO recipes (product_id, ingredient_id, quantity, unit)
       VALUES (?,?,?,?)
       ON CONFLICT(product_id, ingredient_id) DO UPDATE SET quantity=excluded.quantity, unit=excluded.unit, updated_at=CURRENT_TIMESTAMP
     `).run(productId, ingredientId, quantity, unit || null);
+
+    try {
+      // For upsert, we need to fetch the row to get its ID (if inserted) or updated timestamps
+      const fullRow = this.db.prepare('SELECT * FROM recipes WHERE product_id=? AND ingredient_id=?').get(productId, ingredientId);
+      enqueueSyncOperation('recipes', result.changes > 0 && result.lastInsertRowid ? 'INSERT' : 'UPDATE', fullRow);
+    } catch (err) { console.error('Recipe sync error:', err); }
+
     return { success: true };
   }
 
   removeIngredient(productId: number, ingredientId: number): any {
     this.db.prepare('DELETE FROM recipes WHERE product_id=? AND ingredient_id=?').run(productId, ingredientId);
+    
+    try {
+      enqueueSyncOperation('recipes', 'DELETE', { product_id: productId, ingredient_id: ingredientId }); // Composite key for delete
+    } catch (err) { console.error('Recipe sync error:', err); }
+
     return { success: true };
   }
 
   setRecipe(productId: number, items: { ingredient_id: number; quantity: number; unit?: string }[]): any {
     const setAll = this.db.transaction(() => {
+      const existingRecipes = this.db.prepare('SELECT product_id, ingredient_id FROM recipes WHERE product_id=?').all(productId) as any[];
       this.db.prepare('DELETE FROM recipes WHERE product_id=?').run(productId);
+      for (const { product_id, ingredient_id } of existingRecipes) {
+        try {
+          enqueueSyncOperation('recipes', 'DELETE', { product_id, ingredient_id });
+        } catch (err) { console.error('Recipe sync error (batch delete):', err); }
+      }
+
       for (const item of items) {
-        this.db.prepare(
+        const result = this.db.prepare(
           'INSERT INTO recipes (product_id, ingredient_id, quantity, unit) VALUES (?,?,?,?)'
         ).run(productId, item.ingredient_id, item.quantity, item.unit || null);
+        try {
+          const fullRow = this.db.prepare('SELECT * FROM recipes WHERE product_id=? AND ingredient_id=?').get(productId, item.ingredient_id);
+          enqueueSyncOperation('recipes', 'INSERT', fullRow);
+        } catch (err) { console.error('Recipe sync error (batch insert):', err); }
       }
     });
     setAll();
@@ -1260,18 +1370,35 @@ class ModifiersService {
     const r = this.db.prepare(
       'INSERT INTO modifiers (name, description, is_required, allow_multiple) VALUES (?,?,?,?)'
     ).run(data.name, data.description || null, data.is_required ? 1 : 0, data.allow_multiple ? 1 : 0);
+    
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM modifiers WHERE id=?').get(r.lastInsertRowid);
+      enqueueSyncOperation('modifiers', 'INSERT', fullRow);
+    } catch (err) { console.error('Modifier sync error:', err); }
+
     return { success: true, id: r.lastInsertRowid };
   }
 
   updateModifier(id: number, data: any): any {
     this.db.prepare(
-      'UPDATE modifiers SET name=?, description=?, is_required=?, allow_multiple=? WHERE id=?'
+      'UPDATE modifiers SET name=?, description=?, is_required=?, allow_multiple=?, updated_at=CURRENT_TIMESTAMP WHERE id=?'
     ).run(data.name, data.description || null, data.is_required ? 1 : 0, data.allow_multiple ? 1 : 0, id);
+    
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM modifiers WHERE id=?').get(id);
+      enqueueSyncOperation('modifiers', 'UPDATE', fullRow);
+    } catch (err) { console.error('Modifier sync error:', err); }
+
     return { success: true };
   }
 
   deleteModifier(id: number): any {
     this.db.prepare('DELETE FROM modifiers WHERE id=?').run(id);
+    
+    try {
+      enqueueSyncOperation('modifiers', 'DELETE', { id });
+    } catch (err) { console.error('Modifier sync error:', err); }
+
     return { success: true };
   }
 
@@ -1279,25 +1406,50 @@ class ModifiersService {
     const r = this.db.prepare(
       'INSERT INTO modifier_options (modifier_id, name, price_adjustment) VALUES (?,?,?)'
     ).run(modifierId, data.name, data.price_adjustment || 0);
+    
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM modifier_options WHERE id=?').get(r.lastInsertRowid);
+      enqueueSyncOperation('modifier_options', 'INSERT', fullRow);
+    } catch (err) { console.error('Modifier option sync error:', err); }
+
     return { success: true, id: r.lastInsertRowid };
   }
 
   updateOption(id: number, data: any): any {
     this.db.prepare(
-      'UPDATE modifier_options SET name=?, price_adjustment=? WHERE id=?'
+      'UPDATE modifier_options SET name=?, price_adjustment=?, updated_at=CURRENT_TIMESTAMP WHERE id=?'
     ).run(data.name, data.price_adjustment || 0, id);
+    
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM modifier_options WHERE id=?').get(id);
+      enqueueSyncOperation('modifier_options', 'UPDATE', fullRow);
+    } catch (err) { console.error('Modifier option sync error:', err); }
+
     return { success: true };
   }
 
   deleteOption(id: number): any {
     this.db.prepare('DELETE FROM modifier_options WHERE id=?').run(id);
+    
+    try {
+      enqueueSyncOperation('modifier_options', 'DELETE', { id });
+    } catch (err) { console.error('Modifier option sync error:', err); }
+
     return { success: true };
   }
 
   linkToProduct(productId: number, modifierId: number): any {
-    this.db.prepare(
+    const r = this.db.prepare(
       'INSERT OR IGNORE INTO product_modifiers (product_id, modifier_id) VALUES (?,?)'
     ).run(productId, modifierId);
+    
+    if (r.changes > 0) { // Only sync if a new row was actually inserted
+      try {
+        const fullRow = this.db.prepare('SELECT * FROM product_modifiers WHERE product_id=? AND modifier_id=?').get(productId, modifierId);
+        enqueueSyncOperation('product_modifiers', 'INSERT', fullRow);
+      } catch (err) { console.error('Product modifier link sync error:', err); }
+    }
+
     return { success: true };
   }
 
@@ -1305,6 +1457,11 @@ class ModifiersService {
     this.db.prepare(
       'DELETE FROM product_modifiers WHERE product_id=? AND modifier_id=?'
     ).run(productId, modifierId);
+    
+    try {
+      enqueueSyncOperation('product_modifiers', 'DELETE', { product_id: productId, modifier_id: modifierId });
+    } catch (err) { console.error('Product modifier unlink sync error:', err); }
+
     return { success: true };
   }
 }
@@ -1318,15 +1475,33 @@ class SuppliersService {
   create(data: any): any {
     const r = this.db.prepare('INSERT INTO suppliers (name, contact_person, phone, email, address, notes) VALUES (?,?,?,?,?,?)')
       .run(data.name, data.contact_person || null, data.phone || null, data.email || null, data.address || null, data.notes || null);
+    
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM suppliers WHERE id=?').get(r.lastInsertRowid);
+      enqueueSyncOperation('suppliers', 'INSERT', fullRow);
+    } catch (err) { console.error('Supplier sync error:', err); }
+
     return { success: true, id: r.lastInsertRowid };
   }
   update(id: number, data: any): any {
     this.db.prepare('UPDATE suppliers SET name=?, contact_person=?, phone=?, email=?, address=?, notes=?, updated_at=CURRENT_TIMESTAMP WHERE id=?')
       .run(data.name, data.contact_person || null, data.phone || null, data.email || null, data.address || null, data.notes || null, id);
+    
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM suppliers WHERE id=?').get(id);
+      enqueueSyncOperation('suppliers', 'UPDATE', fullRow);
+    } catch (err) { console.error('Supplier sync error:', err); }
+
     return { success: true };
   }
   delete(id: number): any {
     this.db.prepare('UPDATE suppliers SET deleted_at=CURRENT_TIMESTAMP WHERE id=?').run(id);
+    
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM suppliers WHERE id=?').get(id);
+      enqueueSyncOperation('suppliers', 'UPDATE', fullRow); // Soft delete is an update
+    } catch (err) { console.error('Supplier sync error:', err); }
+
     return { success: true };
   }
 }
@@ -1338,13 +1513,47 @@ class CustomersService {
     return this.db.prepare('SELECT * FROM customers WHERE deleted_at IS NULL ORDER BY name').all();
   }
   create(data: any): any {
-    const r = this.db.prepare('INSERT INTO customers (name, phone, email, address) VALUES (?,?,?,?)')
-      .run(data.name, data.phone || null, data.email || null, data.address || null);
-    return { success: true, id: r.lastInsertRowid };
+    const r = this.db.prepare('INSERT INTO customers (name, phone, email, address, notes) VALUES (?,?,?,?,?)')
+      .run(data.name, data.phone || null, data.email || null, data.address || null, data.notes || null);
+    
+    // Auto-create Loyalty Card
+    const customerId = r.lastInsertRowid;
+    const loyaltyCode = 'LOYALTY-LC' + Math.random().toString(36).substring(2, 8).toUpperCase();
+    const thresholdSetting = this.db.prepare("SELECT value FROM settings WHERE key='loyalty_reward_threshold'").get() as any;
+    const threshold = thresholdSetting ? parseInt(thresholdSetting.value) : 10;
+
+    const lr = this.db.prepare('INSERT INTO loyalty_cards (customer_id, loyalty_code, reward_threshold) VALUES (?,?,?)')
+      .run(customerId, loyaltyCode, threshold);
+
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM customers WHERE id=?').get(customerId);
+      enqueueSyncOperation('customers', 'INSERT', fullRow);
+      
+      const cardRow = this.db.prepare('SELECT * FROM loyalty_cards WHERE id=?').get(lr.lastInsertRowid);
+      enqueueSyncOperation('loyalty_cards', 'INSERT', cardRow);
+    } catch (err) { console.error('Customer/Loyalty sync error:', err); }
+
+    return { success: true, id: customerId };
   }
   update(id: number, data: any): any {
-    this.db.prepare('UPDATE customers SET name=?, phone=?, email=?, address=?, updated_at=CURRENT_TIMESTAMP WHERE id=?')
-      .run(data.name, data.phone || null, data.email || null, data.address || null, id);
+    this.db.prepare('UPDATE customers SET name=?, phone=?, email=?, address=?, notes=?, updated_at=CURRENT_TIMESTAMP WHERE id=?')
+      .run(data.name, data.phone || null, data.email || null, data.address || null, data.notes || null, id);
+    
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM customers WHERE id=?').get(id);
+      enqueueSyncOperation('customers', 'UPDATE', fullRow);
+    } catch (err) { console.error('Customer sync error:', err); }
+
+    return { success: true };
+  }
+  delete(id: number): any {
+    this.db.prepare('UPDATE customers SET deleted_at=CURRENT_TIMESTAMP WHERE id=?').run(id);
+    
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM customers WHERE id=?').get(id);
+      enqueueSyncOperation('customers', 'UPDATE', fullRow); // Soft delete is an update
+    } catch (err) { console.error('Customer sync error:', err); }
+
     return { success: true };
   }
 }
@@ -1358,15 +1567,33 @@ class ExpensesService {
   create(data: any): any {
     const r = this.db.prepare('INSERT INTO expenses (category, description, amount, date, payment_method, reference, user_id, notes) VALUES (?,?,?,?,?,?,?,?)')
       .run(data.category, data.description, data.amount, data.date, data.payment_method || 'cash', data.reference || null, data.user_id || null, data.notes || null);
+    
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM expenses WHERE id=?').get(r.lastInsertRowid);
+      enqueueSyncOperation('expenses', 'INSERT', fullRow);
+    } catch (err) { console.error('Expense sync error:', err); }
+
     return { success: true, id: r.lastInsertRowid };
   }
   update(id: number, data: any): any {
     this.db.prepare('UPDATE expenses SET category=?, description=?, amount=?, date=?, payment_method=?, reference=?, notes=?, updated_at=CURRENT_TIMESTAMP WHERE id=?')
       .run(data.category, data.description, data.amount, data.date, data.payment_method || 'cash', data.reference || null, data.notes || null, id);
+    
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM expenses WHERE id=?').get(id);
+      enqueueSyncOperation('expenses', 'UPDATE', fullRow);
+    } catch (err) { console.error('Expense sync error:', err); }
+
     return { success: true };
   }
   delete(id: number): any {
     this.db.prepare('UPDATE expenses SET deleted_at=CURRENT_TIMESTAMP WHERE id=?').run(id);
+    
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM expenses WHERE id=?').get(id);
+      enqueueSyncOperation('expenses', 'UPDATE', fullRow);
+    } catch (err) { console.error('Expense sync error:', err); }
+
     return { success: true };
   }
 }
@@ -1393,7 +1620,12 @@ class ReportsService {
       GROUP BY p.id ORDER BY revenue DESC LIMIT 5
     `).all(monthStart);
 
-    return { todaySales, weeklySales, monthlySales, lowStock, recentOrders, topProducts };
+    const loyaltySummary = this.db.prepare(`SELECT COUNT(*) as count, COALESCE(SUM(loyalty_discount_amount),0) as saved FROM orders WHERE DATE(created_at) >= ? AND loyalty_redeemed = 1`).get(monthStart) as any;
+
+    return { 
+      todaySales, weeklySales, monthlySales, lowStock, recentOrders, topProducts,
+      loyaltySummary 
+    };
   }
 
   getSalesTrend(days: number): any[] {
@@ -1513,6 +1745,14 @@ class SettingsService {
       }
     });
     updateAll(data);
+    
+    try {
+      for (const key of Object.keys(data)) {
+        const row = this.db.prepare('SELECT * FROM settings WHERE key=?').get(key);
+        enqueueSyncOperation('settings', 'UPDATE', row);
+      }
+    } catch (err) { console.error('Settings sync error:', err); }
+
     return { success: true };
   }
 }
@@ -1845,6 +2085,119 @@ export class LicenseService {
     } catch (err: any) {
       return { synced: false, message: err.message };
     }
+  }
+}
+
+// ─── Loyalty Service ─────────────────────────────────────────────────────────────
+class LoyaltyService {
+  constructor(private db: Database.Database) {}
+
+  getCardByCode(code: string): any {
+    // Strip "LOYALTY-" prefix if present
+    const cleanCode = code.startsWith('LOYALTY-') ? code : `LOYALTY-${code}`;
+    return this.db.prepare(`
+      SELECT lc.*, c.name as customer_name, c.phone as customer_phone
+      FROM loyalty_cards lc
+      JOIN customers c ON lc.customer_id = c.id
+      WHERE lc.loyalty_code = ? OR lc.loyalty_code = ?
+    `).get(cleanCode, code.replace('LOYALTY-', ''));
+  }
+
+  createCard(customerId: number, code: string): any {
+    const thresholdSetting = this.db.prepare("SELECT value FROM settings WHERE key='loyalty_reward_threshold'").get() as any;
+    const threshold = thresholdSetting ? parseInt(thresholdSetting.value) : 10;
+
+    const r = this.db.prepare('INSERT INTO loyalty_cards (customer_id, loyalty_code, reward_threshold) VALUES (?,?,?)')
+      .run(customerId, code, threshold);
+
+    try {
+      const fullRow = this.db.prepare('SELECT * FROM loyalty_cards WHERE id=?').get(r.lastInsertRowid);
+      enqueueSyncOperation('loyalty_cards', 'INSERT', fullRow);
+    } catch (err) { console.error('Loyalty card sync error:', err); }
+
+    return { success: true, id: r.lastInsertRowid };
+  }
+
+  getCardByCustomerId(customerId: number): any {
+    return this.db.prepare('SELECT * FROM loyalty_cards WHERE customer_id = ?').get(customerId);
+  }
+
+  addStamps(customerId: number, stamps: number, orderId?: number): any {
+    const card = this.getCardByCustomerId(customerId);
+    if (!card) return { success: false, error: 'No loyalty card found' };
+
+    const newStamps = card.stamps + stamps;
+    this.db.prepare('UPDATE loyalty_cards SET stamps = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+      .run(newStamps, card.id);
+
+    // Sync back to customers table to show on cards/lists
+    this.db.prepare('UPDATE customers SET loyalty_points = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+      .run(newStamps, customerId);
+
+    const tr = this.db.prepare('INSERT INTO loyalty_transactions (customer_id, order_id, stamps_added) VALUES (?,?,?)')
+      .run(customerId, orderId || null, stamps);
+
+    try {
+      const fullCard = this.db.prepare('SELECT * FROM loyalty_cards WHERE id = ?').get(card.id);
+      enqueueSyncOperation('loyalty_cards', 'UPDATE', fullCard);
+      
+      const fullCust = this.db.prepare('SELECT * FROM customers WHERE id = ?').get(customerId);
+      enqueueSyncOperation('customers', 'UPDATE', fullCust);
+
+      const fullTx = this.db.prepare('SELECT * FROM loyalty_transactions WHERE id = ?').get(tr.lastInsertRowid);
+      enqueueSyncOperation('loyalty_transactions', 'INSERT', fullTx);
+    } catch (err) { console.error('Loyalty update sync error:', err); }
+
+    return { success: true, stamps: newStamps };
+  }
+
+  redeemReward(customerId: number, orderId?: number): any {
+    const card = this.getCardByCustomerId(customerId);
+    if (!card) return { success: false, error: 'No loyalty card found' };
+    if (card.stamps < card.reward_threshold) return { success: false, error: 'Insufficient stamps' };
+
+    // Reset stamps after reward threshold
+    const remainingStamps = card.stamps - card.reward_threshold;
+    this.db.prepare('UPDATE loyalty_cards SET stamps = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+      .run(remainingStamps, card.id);
+
+    // Sync back to customers table
+    this.db.prepare('UPDATE customers SET loyalty_points = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+      .run(remainingStamps, customerId);
+
+    const tr = this.db.prepare('INSERT INTO loyalty_transactions (customer_id, order_id, reward_redeemed) VALUES (?,?,?)')
+      .run(customerId, orderId || null, 1);
+
+    try {
+      const fullCard = this.db.prepare('SELECT * FROM loyalty_cards WHERE id = ?').get(card.id);
+      enqueueSyncOperation('loyalty_cards', 'UPDATE', fullCard);
+      
+      const fullCust = this.db.prepare('SELECT * FROM customers WHERE id = ?').get(customerId);
+      enqueueSyncOperation('customers', 'UPDATE', fullCust);
+
+      const fullTx = this.db.prepare('SELECT * FROM loyalty_transactions WHERE id = ?').get(tr.lastInsertRowid);
+      enqueueSyncOperation('loyalty_transactions', 'INSERT', fullTx);
+    } catch (err) { console.error('Loyalty redemption sync error:', err); }
+
+    return { success: true, stamps: remainingStamps };
+  }
+
+  getTransactions(customerId: number): any[] {
+    return this.db.prepare('SELECT * FROM loyalty_transactions WHERE customer_id = ? ORDER BY created_at DESC LIMIT 50')
+      .all(customerId);
+  }
+
+  syncDown(cards: any[]): void {
+    const insert = this.db.prepare(`
+      INSERT OR REPLACE INTO loyalty_cards (id, customer_id, loyalty_code, stamps, reward_threshold, created_at, updated_at)
+      VALUES (@id, @customer_id, @loyalty_code, @stamps, @reward_threshold, @created_at, @updated_at)
+    `);
+    
+    const transaction = this.db.transaction((items) => {
+      for (const item of items) insert.run(item);
+    });
+    
+    transaction(cards);
   }
 }
 

@@ -1,10 +1,11 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Search, ShoppingCart, Trash2, Plus, Minus, Tag, ChevronRight, X, CreditCard, Banknote, Smartphone } from 'lucide-react';
+import { Search, ShoppingCart, Trash2, Plus, Minus, Tag, ChevronRight, X, CreditCard, Banknote, Smartphone, Coffee } from 'lucide-react';
 import { Product, Category } from '../../types';
 import { usePOSStore } from '../../store/posStore';
 import { useAppStore } from '../../store/appStore';
 import toast from 'react-hot-toast';
 import ReceiptModal from './ReceiptModal';
+import LoyaltyPromptModal from './LoyaltyPromptModal';
 
 export default function POSScreen() {
   const [products, setProducts] = useState<Product[]>([]);
@@ -16,30 +17,114 @@ export default function POSScreen() {
   const [lastOrder, setLastOrder] = useState<any>(null);
   const [receiptOpen, setReceiptOpen] = useState(false);
   const [processing, setProcessing] = useState(false);
+  const [variantModalProduct, setVariantModalProduct] = useState<Product | null>(null);
+  const [isRedeeming, setIsRedeeming] = useState(false);
+  const [showLoyaltyPrompt, setShowLoyaltyPrompt] = useState(false);
+  const [recipes, setRecipes] = useState<any[]>([]);
 
   const { user, settings } = useAppStore();
   const currency = settings?.currency_symbol || '₨';
+
+  const getRedemptionDiscount = () => {
+    if (!isRedeeming || !loyaltyCard) return 0;
+    const eligibleCats = JSON.parse(settings?.loyalty_eligible_categories || '[]');
+    const eligibleItems = cart.filter(item => {
+      const product = products.find(p => p.id === item.product_id);
+      return eligibleCats.includes(product?.category_id);
+    });
+    
+    if (eligibleItems.length === 0) return 0;
+    // Discount the cheapest eligible item (or should it be most expensive? Usually cafe policy varies, but cheapest is 'safe'. 
+    // However, usually it's "Get 1 free" of the same category, often the one in the cart. Let's pick the max for better customer joy.)
+    return Math.max(...eligibleItems.map(i => i.unit_price));
+  };
+
+  const currentTotal = () => {
+    const baseTotal = total();
+    return Math.max(0, baseTotal - getRedemptionDiscount());
+  };
 
   const {
     cart, addToCart, removeFromCart, updateQuantity,
     updateItemDiscount, clearCart, setDiscount, setPaymentMethod,
     setAmountPaid, subtotal, discountAmount, taxAmount, total,
     changeAmount, discountType, discountValue, paymentMethod, amountPaid,
-    notes, setNotes,
+    notes, setNotes, setCustomer, loyaltyCard, setLoyaltyCard, customerId
   } = usePOSStore();
 
   useEffect(() => {
     loadData();
-  }, []);
+
+    // Global barcode/QR scanner listener
+    let scanBuffer = '';
+    let lastKeyTime = Date.now();
+
+    const handleKeyPress = async (e: KeyboardEvent) => {
+      // Ignore if in input
+      if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') return;
+
+      const currentTime = Date.now();
+      if (currentTime - lastKeyTime > 100) scanBuffer = ''; // Reset if slow typing
+      lastKeyTime = currentTime;
+
+      if (e.key === 'Enter') {
+        if (scanBuffer.startsWith('LOYALTY-')) {
+          const code = scanBuffer;
+          const card = await window.electronAPI.loyalty.getCardByCode(code);
+          if (card) {
+            setCustomer(card.customer_id, card.customer_name);
+            setLoyaltyCard(card);
+            toast.success(`Loyalty Account: ${card.customer_name}`, { icon: '☕' });
+          } else {
+            toast.error('Invalid Loyalty QR');
+          }
+        }
+        scanBuffer = '';
+      } else if (e.key.length === 1) {
+        scanBuffer += e.key;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyPress);
+    return () => window.removeEventListener('keydown', handleKeyPress);
+  }, [setCustomer, setLoyaltyCard]);
 
   const loadData = async () => {
-    const [prods, cats] = await Promise.all([
+    const [prods, cats, recs] = await Promise.all([
       window.electronAPI.products.getAll(),
       window.electronAPI.categories.getAll(),
+      window.electronAPI.recipes.getAll(),
     ]);
-    setProducts(prods.filter((p: Product) => p.is_active === 1));
+    // Note: We no longer filter out inactive products so they can show 'Unavailable'
+    setProducts(prods);
     setCategories(cats.filter((c: Category) => c.is_active === 1));
+    setRecipes(recs);
     setLoading(false);
+  };
+
+  const getProductStatus = (product: Product) => {
+    // 1. Check Master Switch
+    if (!product.is_active) return { label: 'Unavailable', color: 'text-red-400', disabled: true };
+    
+    // 2. Check Recipes (Ingredient Tracking)
+    const productRecipes = recipes.filter(r => r.product_id === product.id);
+    
+    if (productRecipes.length > 0) {
+      // First, check for CRITICAL shortages (not enough for even 1 sale)
+      const outOf = productRecipes.find(r => r.current_stock < r.quantity);
+      if (outOf) {
+        return { label: `Out of ${outOf.ingredient_name}`, color: 'text-amber-500', disabled: false };
+      }
+
+      // Second, check for warnings (below reorder level but still available)
+      const lowOn = productRecipes.find(r => r.current_stock < (r.reorder_level || 10));
+      if (lowOn) {
+        return { label: `Low ${lowOn.ingredient_name}`, color: 'text-amber-400', disabled: false };
+      }
+    }
+    
+    // 3. Simple product (No recipe or full stock) -> Available
+    return { label: 'Available', color: 'text-emerald-400', disabled: false };
   };
 
   const filteredProducts = useCallback(() => {
@@ -53,43 +138,135 @@ export default function POSScreen() {
     return list;
   }, [products, selectedCategory, searchQuery]);
 
-  const handleAddToCart = (product: Product) => {
+  const handleAddToCart = (product: Product, variant?: any) => {
+    if (product.variants && product.variants.length > 0 && !variant) {
+      setVariantModalProduct(product);
+      return;
+    }
+
+    const price = variant ? variant.price : product.price;
+    const status = getProductStatus(product);
+
+    if (status.label === 'Unavailable') {
+      toast.error('Product is currently inactive');
+      return;
+    }
+
+    if (status.label.startsWith('Out of')) {
+      toast.error(status.label);
+      return;
+    }
+
     addToCart({
       product_id: product.id,
+      variant_id: variant?.id,
       product_name: product.name,
-      unit_price: product.price,
+      variant_name: variant?.name,
+      unit_price: price,
       quantity: 1,
       discount_percent: 0,
       tax_rate: product.tax_rate,
-      line_total: product.price,
+      line_total: price,
     });
+    
+    setVariantModalProduct(null);
   };
 
-  const handleCheckout = async () => {
+  const handleCheckout = async (arg: any = false) => {
+    const skipPrompt = typeof arg === 'boolean' ? arg : false;
+
     if (cart.length === 0) { toast.error('Cart is empty'); return; }
     if (paymentMethod === 'cash' && amountPaid < total()) {
       toast.error('Amount paid is less than total'); return;
     }
 
+    const getFinalItems = () => {
+      if (!isRedeeming || !loyaltyCard) return cart;
+      const eligibleCats = JSON.parse(settings?.loyalty_eligible_categories || '[]');
+      const items = [...cart];
+      // Find the most expensive eligible item to discount
+      let bestIndex = -1;
+      let maxPrice = -1;
+      items.forEach((item, idx) => {
+        const product = products.find(p => p.id === item.product_id);
+        if (eligibleCats.includes(product?.category_id) && item.unit_price > maxPrice) {
+          maxPrice = item.unit_price;
+          bestIndex = idx;
+        }
+      });
+      
+      if (bestIndex !== -1) {
+        // If they have multiple quantity, we only discount ONE.
+        if (items[bestIndex].quantity > 1) {
+           const origItem = items[bestIndex];
+           // Split it into two lines: one free, others paid. 
+           // Or just subtract one price from line_total.
+           // Cleaner: subtract one unit price from line_total.
+           items[bestIndex] = { ...origItem, line_total: Math.max(0, origItem.line_total - origItem.unit_price) };
+        } else {
+           items[bestIndex] = { ...items[bestIndex], line_total: 0 };
+        }
+      }
+      return items;
+    };
+
+    const orderData = {
+      user_id: user!.id,
+      items: getFinalItems(),
+      subtotal: subtotal(),
+      discount_type: discountType,
+      discount_value: discountValue,
+      discount_amount: discountAmount(),
+      tax_amount: taxAmount(),
+      total: currentTotal(),
+      payment_method: paymentMethod,
+      amount_paid: paymentMethod === 'cash' ? amountPaid : currentTotal(),
+      change_amount: Math.max(0, amountPaid - currentTotal()),
+      notes,
+      customer_id: customerId,
+      loyalty_redeemed: !!loyaltyCard && loyaltyCard.stamps >= loyaltyCard.reward_threshold && isRedeeming,
+      loyalty_discount_amount: getRedemptionDiscount(),
+    };
+
+    // Check if we should prompt for loyalty
+    if (!customerId && !skipPrompt) {
+      const eligibleCats = JSON.parse(settings?.loyalty_eligible_categories || '[]');
+      const eligibleItems = cart.filter(item => {
+        const product = products.find(p => p.id === item.product_id);
+        return eligibleCats.includes(product?.category_id);
+      });
+
+      if (eligibleItems.length > 0) {
+        setShowLoyaltyPrompt(true);
+        return;
+      }
+    }
+
     setProcessing(true);
     try {
-      const orderData = {
-        user_id: user!.id,
-        items: cart,
-        subtotal: subtotal(),
-        discount_type: discountType,
-        discount_value: discountValue,
-        discount_amount: discountAmount(),
-        tax_amount: taxAmount(),
-        total: total(),
-        payment_method: paymentMethod,
-        amount_paid: paymentMethod === 'cash' ? amountPaid : total(),
-        change_amount: changeAmount(),
-        notes,
-      };
-
       const result = await window.electronAPI.orders.create(orderData);
       if (result.success) {
+        // Loyalty Stamp Logic
+        if (loyaltyCard) {
+          if (isRedeeming) {
+            await window.electronAPI.loyalty.redeemReward(loyaltyCard.customer_id, result.id);
+            toast.success('Reward Redeemed! ☕');
+            setIsRedeeming(false);
+          } else {
+            const eligibleCats = JSON.parse(settings?.loyalty_eligible_categories || '[]');
+            const coffeeItems = cart.filter(item => {
+              const product = products.find(p => p.id === item.product_id);
+              return eligibleCats.includes(product?.category_id);
+            });
+
+            if (coffeeItems.length > 0) {
+              const stampsToAdd = coffeeItems.reduce((sum, item) => sum + item.quantity, 0);
+              await window.electronAPI.loyalty.addStamps(loyaltyCard.customer_id, stampsToAdd, result.id);
+              toast.success(`+${stampsToAdd} Stamps added!`);
+            }
+          }
+        }
+
         const fullOrder = await window.electronAPI.orders.getById(result.id);
         setLastOrder({ ...fullOrder, currency_symbol: currency });
         clearCart();
@@ -171,13 +348,14 @@ export default function POSScreen() {
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
               {filteredProducts().map(product => {
                 const inCart = cart.find(i => i.product_id === product.id);
-                const outOfStock = product.track_inventory && (product.stock ?? 0) <= 0;
+                const status = getProductStatus(product);
+                
                 return (
                   <button
                     key={product.id}
-                    onClick={() => !outOfStock && handleAddToCart(product)}
-                    disabled={outOfStock}
-                    className={`pos-product-card text-left relative ${outOfStock ? 'opacity-40 cursor-not-allowed' : ''}`}
+                    onClick={() => !status.disabled && handleAddToCart(product)}
+                    disabled={status.disabled}
+                    className={`pos-product-card text-left relative ${status.disabled ? 'opacity-40 cursor-not-allowed grayscale-[0.8]' : ''}`}
                   >
                     {/* Category color strip */}
                     <div
@@ -185,20 +363,24 @@ export default function POSScreen() {
                       style={{ backgroundColor: product.category_color || '#e25a26' }}
                     />
                     {inCart && (
-                      <div className="absolute top-2 right-2 w-5 h-5 bg-brand-500 rounded-full flex items-center justify-center text-white text-[10px] font-bold">
+                      <div className="absolute top-2 right-2 w-5 h-5 bg-brand-500 rounded-full flex items-center justify-center text-white text-[10px] font-bold shadow-lg">
                         {inCart.quantity}
                       </div>
                     )}
-                    <div className="pt-1">
+                    <div className="pt-1 flex flex-col h-full">
                       <p className="text-sm font-semibold text-white leading-tight truncate">{product.name}</p>
                       {product.sku && <p className="text-[10px] text-dark-400 mt-0.5">{product.sku}</p>}
                       <p className="text-xs text-dark-400 mt-1 truncate">{product.category_name}</p>
-                      <p className="text-base font-bold text-brand-400 mt-2">{fmt(product.price)}</p>
-                      {product.track_inventory && (
-                        <p className={`text-[10px] mt-0.5 ${(product.stock ?? 0) <= (product.min_quantity ?? 5) ? 'text-amber-400' : 'text-dark-500'}`}>
-                          {outOfStock ? 'Out of stock' : `Stock: ${product.stock}`}
-                        </p>
-                      )}
+                      
+                      <div className="mt-auto pt-2">
+                        <p className="text-base font-bold text-brand-400">{fmt(product.price)}</p>
+                        
+                        {/* Smart Status Label */}
+                        <div className={`text-[10px] mt-0.5 font-medium flex items-center gap-1 ${status.color}`}>
+                           <span className={`w-1.5 h-1.5 rounded-full ${status.label === 'Available' ? 'bg-emerald-500 animate-pulse' : (status.label === 'Unavailable' ? 'bg-red-500' : 'bg-amber-500')}`} />
+                           {status.label}
+                        </div>
+                      </div>
                     </div>
                   </button>
                 );
@@ -239,7 +421,10 @@ export default function POSScreen() {
               <div key={item.product_id} className="bg-dark-700/60 border border-dark-600/40 rounded-xl p-3">
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-white truncate">{item.product_name}</p>
+                    <p className="text-sm font-medium text-white truncate">
+                      {item.product_name}
+                      {item.variant_name && <span className="text-brand-400 ml-1">({item.variant_name})</span>}
+                    </p>
                     <p className="text-xs text-dark-400">{fmt(item.unit_price)} each</p>
                   </div>
                   <button onClick={() => removeFromCart(item.product_id)} className="text-dark-500 hover:text-red-400 transition-colors flex-shrink-0">
@@ -272,6 +457,45 @@ export default function POSScreen() {
 
         {/* Order totals + Checkout */}
         <div className="border-t border-dark-700/50 px-4 py-4 space-y-3">
+          {/* Loyalty Status */}
+          {loyaltyCard && (
+            <div className={`p-3 rounded-xl border flex items-center justify-between transition-all ${
+              loyaltyCard.stamps >= loyaltyCard.reward_threshold 
+                ? 'bg-amber-500/10 border-amber-500/30' 
+                : 'bg-dark-700/50 border-white/5'
+            }`}>
+              <div className="flex items-center gap-2.5">
+                <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
+                   loyaltyCard.stamps >= loyaltyCard.reward_threshold ? 'bg-amber-500 text-white' : 'bg-dark-600 text-dark-400'
+                }`}>
+                  <Coffee size={16} />
+                </div>
+                <div>
+                  <p className="text-[10px] text-dark-400 font-bold uppercase tracking-wider">{loyaltyCard.customer_name}</p>
+                  <p className="text-xs font-bold text-white">
+                    {loyaltyCard.stamps} / {loyaltyCard.reward_threshold} Stamps
+                  </p>
+                </div>
+              </div>
+              
+              {loyaltyCard.stamps >= loyaltyCard.reward_threshold ? (
+                <button 
+                  onClick={() => setIsRedeeming(!isRedeeming)}
+                  className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase transition-all ${
+                    isRedeeming 
+                      ? 'bg-green-500 text-white shadow-lg shadow-green-500/20' 
+                      : 'bg-amber-500 hover:bg-amber-400 text-white shadow-lg shadow-amber-500/20'
+                  }`}
+                >
+                  {isRedeeming ? 'Applied' : 'Redeem Free'}
+                </button>
+              ) : (
+                <div className="text-[10px] text-dark-500 font-bold">
+                  {loyaltyCard.reward_threshold - loyaltyCard.stamps} to go
+                </div>
+              )}
+            </div>
+          )}
           {/* Discount */}
           <div className="flex items-center gap-2">
             <Tag size={14} className="text-dark-400 flex-shrink-0" />
@@ -311,8 +535,13 @@ export default function POSScreen() {
                 <span>Tax</span><span>{fmt(taxAmount())}</span>
               </div>
             )}
+            {getRedemptionDiscount() > 0 && (
+              <div className="flex justify-between text-brand-400">
+                <span>Loyalty Reward</span><span>- {fmt(getRedemptionDiscount())}</span>
+              </div>
+            )}
             <div className="flex justify-between text-white font-bold text-lg border-t border-dark-700/50 pt-2 mt-1">
-              <span>Total</span><span className="text-brand-400">{fmt(total())}</span>
+              <span>Total</span><span className="text-brand-400">{fmt(currentTotal())}</span>
             </div>
           </div>
 
@@ -390,6 +619,63 @@ export default function POSScreen() {
       {/* Receipt Modal */}
       {receiptOpen && lastOrder && (
         <ReceiptModal order={lastOrder} onClose={() => setReceiptOpen(false)} />
+      )}
+
+      {/* Loyalty Referral Prompt */}
+      {showLoyaltyPrompt && (
+        <LoyaltyPromptModal
+          stampsToEarn={cart.reduce((sum, item) => {
+            const product = products.find(p => p.id === item.product_id);
+            const eligibleCats = JSON.parse(settings?.loyalty_eligible_categories || '[]');
+            return sum + (eligibleCats.includes(product?.category_id) ? item.quantity : 0);
+          }, 0)}
+          onClose={() => setShowLoyaltyPrompt(false)}
+          onCustomerSelected={async (c) => {
+             setCustomer(c.id, c.name);
+             const card = await window.electronAPI.loyalty.getCardByCustomerId(c.id);
+             setLoyaltyCard(card);
+             setShowLoyaltyPrompt(false);
+          }}
+          onContinueAsGuest={() => {
+            setShowLoyaltyPrompt(false);
+            setTimeout(() => handleCheckout(true), 100);
+          }}
+        />
+      )}
+
+      {/* Variant Selection Modal */}
+      {variantModalProduct && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-[100] animate-fade-in">
+          <div className="bg-dark-800 rounded-2xl w-full max-w-sm border border-dark-700/50 shadow-2xl overflow-hidden scale-in">
+            <div className="px-5 py-4 border-b border-dark-700/50 flex items-center justify-between bg-dark-800/80">
+              <div>
+                <h3 className="text-lg font-bold text-white">{variantModalProduct.name}</h3>
+                <p className="text-xs text-dark-400">Select a size/variant</p>
+              </div>
+              <button onClick={() => setVariantModalProduct(null)} className="text-dark-400 hover:text-white transition-colors bg-dark-700 p-1.5 rounded-lg">
+                <X size={18} />
+              </button>
+            </div>
+            
+            <div className="p-4 space-y-2">
+              {variantModalProduct.variants?.map((v) => (
+                <button
+                  key={v.id}
+                  onClick={() => handleAddToCart(variantModalProduct, v)}
+                  className="w-full flex items-center justify-between p-4 bg-dark-700/50 hover:bg-brand-500/10 border border-dark-600/50 hover:border-brand-500/30 rounded-xl transition-all group"
+                >
+                  <span className="font-medium text-white group-hover:text-brand-300">
+                    {v.name}
+                  </span>
+                  <span className="font-bold text-brand-400">{fmt(v.price)}</span>
+                </button>
+              ))}
+            </div>
+            <div className="p-4 pt-2 border-t border-dark-700/50">
+               <button onClick={() => setVariantModalProduct(null)} className="btn-secondary w-full">Cancel</button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -10,6 +10,7 @@ interface POSState {
   notes: string;
   paymentMethod: 'cash' | 'card' | 'online' | 'split';
   amountPaid: number;
+  loyaltyCard: any | null;
 
   // Cart Actions
   addToCart: (item: CartItem) => void;
@@ -24,6 +25,7 @@ interface POSState {
   setNotes: (notes: string) => void;
   setPaymentMethod: (method: 'cash' | 'card' | 'online' | 'split') => void;
   setAmountPaid: (amount: number) => void;
+  setLoyaltyCard: (card: any | null) => void;
 
   // Computed
   subtotal: () => number;
@@ -42,6 +44,7 @@ export const usePOSStore = create<POSState>((set, get) => ({
   notes: '',
   paymentMethod: 'cash',
   amountPaid: 0,
+  loyaltyCard: null,
 
   addToCart: (item) =>
     set((state) => {
@@ -91,6 +94,7 @@ export const usePOSStore = create<POSState>((set, get) => ({
       notes: '',
       paymentMethod: 'cash',
       amountPaid: 0,
+      loyaltyCard: null,
     }),
 
   setCustomer: (id, name) => set({ customerId: id, customerName: name }),
@@ -98,6 +102,7 @@ export const usePOSStore = create<POSState>((set, get) => ({
   setNotes: (notes) => set({ notes }),
   setPaymentMethod: (method) => set({ paymentMethod: method }),
   setAmountPaid: (amount) => set({ amountPaid: amount }),
+  setLoyaltyCard: (card) => set({ loyaltyCard: card }),
 
   subtotal: () => get().cart.reduce((sum, i) => sum + i.line_total, 0),
 

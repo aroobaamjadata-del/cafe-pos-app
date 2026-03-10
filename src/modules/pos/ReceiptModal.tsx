@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useRef, useState, useEffect } from 'react';
 import { X, Printer, Download } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
 import { useAppStore } from '../../store/appStore';
@@ -12,6 +12,13 @@ export default function ReceiptModal({ order, onClose }: ReceiptModalProps) {
   const receiptRef = useRef<HTMLDivElement>(null);
   const settings = useAppStore(s => s.settings);
   const currency = settings?.currency_symbol || '₨';
+  const [loyalty, setLoyalty] = useState<any>(null);
+
+  useEffect(() => {
+    if (order.customer_id) {
+      window.electronAPI.loyalty.getCardByCustomerId(order.customer_id).then(setLoyalty);
+    }
+  }, [order.customer_id]);
 
   const fmt = (v: number) => `${currency}${Number(v).toFixed(0)}`;
   const fmtDate = (d: string) => {
@@ -96,6 +103,11 @@ export default function ReceiptModal({ order, onClose }: ReceiptModalProps) {
                 <span>Discount</span><span>-{fmt(order.discount_amount)}</span>
               </div>
             )}
+            {order.loyalty_discount_amount > 0 && (
+              <div style={{display:'flex', justifyContent:'space-between', fontSize: 11, color: '#059669'}}>
+                <span>Loyalty Reward</span><span>-{fmt(order.loyalty_discount_amount)}</span>
+              </div>
+            )}
             {order.tax_amount > 0 && (
               <div style={{display:'flex', justifyContent:'space-between', fontSize: 11}}>
                 <span>Tax</span><span>{fmt(order.tax_amount)}</span>
@@ -113,10 +125,27 @@ export default function ReceiptModal({ order, onClose }: ReceiptModalProps) {
               </div>
             )}
 
+            {loyalty && (
+              <div style={{marginTop: 6, border:'1px solid #000', padding: 4, textAlign: 'center'}}>
+                <div style={{fontWeight:'bold', fontSize: 10}}>LOYALTY REWARDS</div>
+                <div style={{fontSize: 11, margin: '2px 0'}}>Current Stamps: {loyalty.stamps} / {loyalty.reward_threshold}</div>
+                {order.loyalty_redeemed ? (
+                  <div style={{fontWeight:'bold', color:'red'}}>REWARD REDEEMED</div>
+                ) : loyalty.stamps >= loyalty.reward_threshold ? (
+                  <div style={{fontWeight:'bold'}}>*** REWARD READY ***</div>
+                ) : (
+                  <div style={{fontSize: 9}}>{loyalty.reward_threshold - loyalty.stamps} more for free coffee!</div>
+                )}
+              </div>
+            )}
+
             <div className="divider" style={{borderTop: '1px dashed #000', margin: '6px 0'}} />
             <div style={{textAlign:'center', fontSize: 11}}>
               <p>{settings?.receipt_footer || 'Thank you for your visit!'}</p>
-              <p style={{marginTop: 4, color:'#666'}}>Powered by Cloud n Cream POS</p>
+              <div style={{marginTop: 6}}>
+                <p style={{color:'#666', fontSize: 10, fontWeight: 'bold'}}>Powered By ATA IT Solutions</p>
+                <p style={{color:'#888', fontSize: 9, marginTop: 1}}>+92 329 2082080</p>
+              </div>
             </div>
           </div>
         </div>
