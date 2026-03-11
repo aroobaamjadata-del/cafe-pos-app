@@ -8,6 +8,9 @@ export interface ElectronAPI {
   auth: {
     login: (username: string, password: string) => Promise<any>;
     setupPassword: (email: string, password: string) => Promise<any>;
+    checkUser: (email: string) => Promise<{ success: boolean; data?: any; error?: string }>;
+    validateReset: (licenseKey: string, tenantCode: string) => Promise<{ success: boolean; error?: string }>;
+    performReset: (tenantCode: string, newPass: string) => Promise<{ success: boolean; error?: string }>;
     logout: () => Promise<any>;
   };
   users: {
@@ -138,6 +141,12 @@ export interface ElectronAPI {
     quitAndInstall: () => Promise<void>;
     onStatus: (callback: (data: { status: string; message: string }) => void) => void;
     removeStatusListener: () => void;
+  };
+  sync: {
+    forceNow: () => Promise<{ pushed: number; pulled: boolean; errors: number }>;
+    getStatus: () => Promise<{ pending: number; failed: number; synced: number }>;
+    onRemoteUpdate: (callback: (table: string, eventType: string, data: any) => void) => void;
+    removeRemoteUpdateListener: () => void;
   };
 }
 

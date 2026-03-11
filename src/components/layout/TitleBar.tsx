@@ -1,11 +1,67 @@
 import { useAppStore } from '../../store/appStore';
+import { useState, useEffect, useCallback } from 'react';
+import toast from 'react-hot-toast';
+
+type SyncState = 'idle' | 'syncing' | 'success' | 'error';
 
 export default function TitleBar() {
   const { user } = useAppStore();
+  const [syncState, setSyncState] = useState<SyncState>('idle');
+  const [pendingOps, setPendingOps] = useState(0);
+  const [lastSynced, setLastSynced] = useState<Date | null>(null);
 
   const minimize = () => window.electronAPI?.window.minimize();
   const maximize = () => window.electronAPI?.window.maximize();
   const close = () => window.electronAPI?.window.close();
+
+  // Poll sync queue status every 30 seconds
+  const refreshStatus = useCallback(async () => {
+    try {
+      const status = await (window.electronAPI as any)?.sync?.getStatus();
+      if (status) setPendingOps(status.pending ?? 0);
+    } catch { /* not critical */ }
+  }, []);
+
+  useEffect(() => {
+    refreshStatus();
+    const interval = setInterval(refreshStatus, 30000);
+    return () => clearInterval(interval);
+  }, [refreshStatus]);
+
+  const handleSyncNow = async () => {
+    if (syncState === 'syncing') return;
+    setSyncState('syncing');
+    try {
+      const result = await (window.electronAPI as any)?.sync?.forceNow();
+      if (result?.errors > 0) {
+        setSyncState('error');
+        toast.error('Sync completed with errors. Check connection.');
+      } else {
+        setSyncState('success');
+        setLastSynced(new Date());
+        toast.success(`Sync complete — ${result?.pushed ?? 0} changes pushed`, { icon: '☁️' });
+      }
+      await refreshStatus();
+    } catch (err) {
+      setSyncState('error');
+      toast.error('Sync failed — check your internet connection');
+    } finally {
+      // Return to idle after 3 seconds
+      setTimeout(() => setSyncState('idle'), 3000);
+    }
+  };
+
+  const syncLabel = syncState === 'syncing' ? 'Syncing…'
+    : syncState === 'success' ? 'Synced'
+    : syncState === 'error' ? 'Sync Error'
+    : pendingOps > 0 ? `${pendingOps} pending`
+    : lastSynced ? 'Synced' : 'Sync';
+
+  const syncDotColor = syncState === 'syncing' ? 'bg-blue-400 animate-pulse'
+    : syncState === 'success' ? 'bg-emerald-400'
+    : syncState === 'error' ? 'bg-red-400'
+    : pendingOps > 0 ? 'bg-amber-400 animate-pulse'
+    : 'bg-emerald-400';
 
   return (
     <div
@@ -19,11 +75,37 @@ export default function TitleBar() {
         <span className="text-dark-500 text-xs ml-2">v1.0.6</span>
       </div>
 
-      {/* Right side - user info + window controls */}
+      {/* Right side */}
       <div
-        className="ml-auto flex items-center gap-4"
+        className="ml-auto flex items-center gap-3"
         style={{ WebkitAppRegion: 'no-drag' } as any}
       >
+        {/* ── Sync Status Button ── */}
+        {user && (
+          <button
+            onClick={handleSyncNow}
+            disabled={syncState === 'syncing'}
+            title={`Manual Sync — ${pendingOps} operation(s) pending\n${lastSynced ? 'Last sync: ' + lastSynced.toLocaleTimeString() : 'No sync yet'}`}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-semibold transition-all border
+              ${syncState === 'syncing'
+                ? 'bg-blue-500/10 border-blue-500/30 text-blue-400 cursor-wait'
+                : syncState === 'error'
+                ? 'bg-red-500/10 border-red-500/30 text-red-400'
+                : pendingOps > 0
+                ? 'bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/20'
+                : 'bg-dark-800 border-dark-600/50 text-dark-400 hover:text-white hover:border-dark-500'
+              }`}
+          >
+            {syncState === 'syncing' ? (
+              <div className="w-2.5 h-2.5 border border-blue-400 border-t-transparent rounded-full animate-spin" />
+            ) : (
+              <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${syncDotColor}`} />
+            )}
+            {syncLabel}
+          </button>
+        )}
+
+        {/* User info */}
         {user && (
           <div className="flex items-center gap-2 text-xs text-dark-400">
             <div className="w-6 h-6 rounded-full bg-brand-500/20 border border-brand-500/30 flex items-center justify-center text-brand-400 font-bold text-xs">

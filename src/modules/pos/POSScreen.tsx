@@ -273,10 +273,13 @@ export default function POSScreen() {
         setCheckoutOpen(false);
         setReceiptOpen(true);
         toast.success(`Order ${result.order_number} completed!`);
-        loadData(); // refresh stock
+        loadData();
       } else {
-        toast.error('Failed to create order');
+        toast.error(result.message || 'Failed to create order');
       }
+    } catch (err: any) {
+      console.error('Checkout error:', err);
+      toast.error(err.message || 'Failed to process order. Check database constraints.');
     } finally {
       setProcessing(false);
     }
@@ -600,7 +603,7 @@ export default function POSScreen() {
 
           {/* Charge button */}
           <button
-            onClick={handleCheckout}
+            onClick={() => handleCheckout(false)}
             disabled={cart.length === 0 || processing}
             className="btn-primary w-full py-3.5 text-base flex items-center justify-center gap-2 mt-1"
           >
@@ -633,12 +636,15 @@ export default function POSScreen() {
           onCustomerSelected={async (c) => {
              setCustomer(c.id, c.name);
              const card = await window.electronAPI.loyalty.getCardByCustomerId(c.id);
-             setLoyaltyCard(card);
+             if (card) {
+               setLoyaltyCard(card);
+             }
              setShowLoyaltyPrompt(false);
           }}
           onContinueAsGuest={() => {
             setShowLoyaltyPrompt(false);
-            setTimeout(() => handleCheckout(true), 100);
+            // Immediately execute checkout, bypassing the prompt
+            handleCheckout(true);
           }}
         />
       )}

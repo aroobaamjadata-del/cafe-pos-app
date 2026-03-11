@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import * as path from 'path';
 import { app } from 'electron';
+import { syncEvents, SYNC_EVENT_DATA_CHANGED } from './syncEvents';
 
 let db: Database.Database | null = null;
 
@@ -74,6 +75,7 @@ export const enqueueSyncOperation = (tableName: string, operation: 'INSERT'|'UPD
     INSERT INTO sync_queue (table_name, operation, payload) VALUES (?, ?, ?)
   `);
   statement.run(tableName, operation, JSON.stringify(payload));
+  syncEvents.emit(SYNC_EVENT_DATA_CHANGED);
 };
 
 export const getUnsyncedOperations = (limit = 50) => {

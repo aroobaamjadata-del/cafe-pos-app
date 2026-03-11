@@ -211,7 +211,7 @@ export default function Dashboard() {
                   <p className="text-sm font-medium text-white">{order.order_number}</p>
                   <p className="text-xs text-dark-400">{fmtDate(order.created_at)}</p>
                 </div>
-                <span className="text-sm text-dark-200 self-center">{order.cashier_name || order.cashier}</span>
+                <span className="text-sm text-dark-200 self-center">{order.cashier_name || (order as any).cashier}</span>
                 <span className="self-center">
                   <span className={`badge text-xs ${
                     order.payment_method === 'cash' ? 'badge-success' :

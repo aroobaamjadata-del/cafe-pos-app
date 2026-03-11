@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Plus, Edit2, Users, Star, Phone } from 'lucide-react';
+import { Plus, Edit2, Users, Star, Phone, Trash2 } from 'lucide-react';
 import { Customer } from '../../types';
 import toast from 'react-hot-toast';
 import Modal from '../../components/ui/Modal';
@@ -22,6 +22,17 @@ export default function CustomersModule() {
     const data = await window.electronAPI.customers.getAll();
     setCustomers(data);
     setLoading(false);
+  };
+
+  const handleDelete = async (customer: Customer) => {
+    if (!window.confirm(`Are you sure you want to delete ${customer.name}?`)) return;
+    try {
+      await window.electronAPI.customers.delete(customer.id);
+      toast.success('Customer deleted');
+      loadData();
+    } catch (err: any) {
+      toast.error('Failed to delete customer: ' + err.message);
+    }
   };
 
   const filtered = customers.filter(c =>
@@ -86,6 +97,9 @@ export default function CustomersModule() {
                 </button>
                 <button onClick={() => setModal({ open: true, customer: c })} className="text-dark-400 hover:text-blue-400 opacity-0 group-hover:opacity-100 transition-all p-1">
                   <Edit2 size={14} />
+                </button>
+                <button onClick={() => handleDelete(c)} className="text-dark-400 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all p-1">
+                  <Trash2 size={14} />
                 </button>
               </div>
             </div>

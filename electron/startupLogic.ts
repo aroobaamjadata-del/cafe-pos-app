@@ -1,61 +1,67 @@
 import { getCachedTenant, getCachedDevice } from './sqliteDatabase';
 import { validateTenantCode } from './validateTenantCode';
 import { DatabaseService } from './database';
+import { createIsolatedSupabaseClient } from './supabase';
+import { syncPullProtocol } from './syncWorker';
 
-export const bootApplication = async (dbSvcParam?: DatabaseService) => {
-  console.log('Booting POS System...');
+/**
+ * PRODUCTION BOOT LOGIC:
+ * 1. Checks local cache for tenant and device activation.
+ * 2. If online, validates device status (active/deactivated) in background.
+ * 3. Triggers an immediate data pull to ensure environment is fresh.
+ */
+export const bootApplication = async (db: DatabaseService) => {
+  console.log('[BOOT] Initializing SaaS environment...');
 
   try {
-    // 1. Check old license cache from database.ts too
-    let dbSvc = dbSvcParam;
-    if (!dbSvc) {
-      dbSvc = new DatabaseService();
-      dbSvc.initialize();
-    }
+    // 1. Check local offline cache
+    const tenant = getCachedTenant();
+    const device = getCachedDevice();
 
-    const oldStatus = dbSvc.license.getStatus();
-    if (oldStatus.active) {
-      return {
-          status: 'ready',
-          tenant: { tenant_id: oldStatus.tenantId, tenant_name: oldStatus.cafeName },
-          mode: 'offline-first'
-      };
-    }
-
-    // 2. Check local offline cache first
-    const localTenant = getCachedTenant();
-    const localDevice = getCachedDevice();
-
-    if (!localTenant || !localDevice) {
-      console.log('No activation found. Booting to Activation Screen.');
+    if (!tenant || !device) {
+      console.log('[BOOT] No activation found. Redirecting to setup screen.');
       return { status: 'requires_activation' };
     }
 
-    // 3. Background Sync / Validation Attempt
-    // We fire this asynchronously so we don't block the UI from loading instantly
-    validateTenantCode(localTenant.tenant_code).then(res => {
-      if (res.success) {
-        console.log('Online Check: Tenant Validated.');
-        // Optionally update the local cache with fresh data here
-      } else if (res.error && !res.error.includes('Network error')) {
-        // Critical Issue: The tenant has been disabled remotely by Super Admin
-        console.error('CRITICAL: Remote tenant access revoked!', res.error);
-        // We can dispatch IPC event to trigger app lockout if needed
-      } else {
-        console.log('Running strictly offline network sync failed.');
-      }
-    });
+    // 2. Background Validation (Online Check)
+    // We don't await this to keep boot time under 500ms
+    createIsolatedSupabaseClient()
+      .from('pos_devices')
+      .select('status, tenant:tenants(status)')
+      .eq('hardware_id', device.hardware_id)
+      .maybeSingle()
+      .then(({ data, error }) => {
+        if (!error && data) {
+          // Check if device or tenant was deactivated remotely
+          const tenantData = Array.isArray(data.tenant) ? data.tenant[0] : data.tenant;
+          const tenantStatus = tenantData?.status || 'active';
+          
+          if (data.status === 'deactivated' || tenantStatus !== 'active') {
+            console.error('[BOOT] ACCESS REVOKED: Device or Tenant is inactive.');
+            // This is a "kill switch" - could trigger an IPC message to lock the frontend
+          } else {
+            console.log('[BOOT] Online validation success.');
+            // Trigger a background data refresh
+            syncPullProtocol(db).catch(e => console.error('[BOOT] Background sync failed:', e));
+          }
+        }
+      });
 
-    console.log(`Starting POS explicitly in Offline-Ready Mode for ${localTenant.tenant_name}`);
+    console.log(`[BOOT] Environment loaded for: ${tenant.tenant_name} (Terminal: ${device.device_name})`);
     
     return { 
       status: 'ready', 
-      tenant: localTenant, 
-      device: localDevice, 
+      tenant: {
+          id: tenant.tenant_id,
+          name: tenant.tenant_name,
+          code: tenant.tenant_code
+      }, 
+      device, 
       mode: 'offline-first' 
     };
+
   } catch (err: any) {
-    console.error('Boot error:', err);
-    return { status: 'requires_activation', error: err.message };
+    console.error('[BOOT] System error:', err);
+    return { status: 'requires_activation', error: 'Database error during boot.' };
   }
 };

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Plus, Edit2, UserCheck, Key } from 'lucide-react';
+import { Plus, Edit2, UserCheck, Key, Trash2, RefreshCw } from 'lucide-react';
 import { User } from '../../types';
 import toast from 'react-hot-toast';
 import Modal from '../../components/ui/Modal';
@@ -12,13 +12,37 @@ export default function StaffModule() {
   const [userModal, setUserModal] = useState<{ open: boolean; user?: User }>({ open: false });
   const [pwModal, setPwModal] = useState<{ open: boolean; userId?: number; name?: string }>({ open: false });
 
-  useEffect(() => { loadData(); }, []);
+  useEffect(() => {
+    loadData();
+    // Listen for real-time remote updates to refresh staff list
+    window.electronAPI?.sync?.onRemoteUpdate?.((table: string) => {
+      if (table === 'staff' || table === 'users') loadData();
+    });
+    return () => { window.electronAPI?.sync?.removeRemoteUpdateListener?.(); };
+  }, []);
 
   const loadData = async () => {
     setLoading(true);
-    const users = await window.electronAPI.users.getAll();
-    setStaff(users);
-    setLoading(false);
+    try {
+      const users = await window.electronAPI.users.getAll();
+      setStaff(Array.isArray(users) ? users : []);
+    } catch (err: any) {
+      console.error('Failed to load staff:', err);
+      setStaff([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDelete = async (user: User) => {
+    if (!window.confirm(`Are you sure you want to delete ${user.full_name}?`)) return;
+    try {
+      await window.electronAPI.users.delete(user.id);
+      toast.success('Staff member deleted');
+      loadData();
+    } catch (err: any) {
+      toast.error('Failed to delete staff: ' + err.message);
+    }
   };
 
   const fmtDate = (d?: string) => {
@@ -30,9 +54,14 @@ export default function StaffModule() {
     <div className="space-y-6 animate-fade-in">
       <div className="flex items-center justify-between">
         <h1 className="page-header">Staff Management</h1>
-        <button onClick={() => setUserModal({ open: true })} className="btn-primary flex items-center gap-2">
-          <Plus size={16} />Add Staff
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={loadData} className="btn-secondary flex items-center gap-2 px-3 py-2 text-sm" title="Refresh">
+            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+          </button>
+          <button onClick={() => setUserModal({ open: true })} className="btn-primary flex items-center gap-2">
+            <Plus size={16} />Add Staff
+          </button>
+        </div>
       </div>
 
       <div className="card">
@@ -53,15 +82,22 @@ export default function StaffModule() {
                 Array(4).fill(0).map((_, i) => (
                   <tr key={i}><td colSpan={6} className="py-2 px-4"><div className="h-10 shimmer rounded" /></td></tr>
                 ))
+              ) : staff.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="py-8 text-center text-dark-400">
+                    <p className="text-sm">No staff members found.</p>
+                    <p className="text-xs mt-1 text-dark-500">Click "+ Add Staff" to create one, or wait for sync to complete.</p>
+                  </td>
+                </tr>
               ) : staff.map(user => (
                 <tr key={user.id} className="border-b border-dark-700/30 hover:bg-dark-700/20 transition-colors">
                   <td className="table-cell">
                     <div className="flex items-center gap-3">
-                      <div className="w-9 h-9 rounded-full bg-brand-500/20 border border-brand-500/30 flex items-center justify-center text-brand-400 font-bold text-sm">
-                        {user.full_name.charAt(0)}
+                      <div className="w-9 h-9 rounded-full bg-brand-500/20 border border-brand-500/30 flex items-center justify-center text-brand-400 font-bold text-sm uppercase">
+                        {(user.full_name || 'U').charAt(0)}
                       </div>
                       <div>
-                        <p className="font-medium text-white">{user.full_name}</p>
+                        <p className="font-medium text-white">{user.full_name || 'Unknown User'}</p>
                         {user.email && <p className="text-xs text-dark-400">{user.email}</p>}
                       </div>
                     </div>
@@ -88,6 +124,9 @@ export default function StaffModule() {
                       </button>
                       <button onClick={() => setPwModal({ open: true, userId: user.id, name: user.full_name })} className="text-dark-400 hover:text-amber-400 transition-colors p-1.5 rounded-lg hover:bg-amber-500/10" title="Change Password">
                         <Key size={14} />
+                      </button>
+                      <button onClick={() => handleDelete(user)} className="text-dark-400 hover:text-red-400 transition-colors p-1.5 rounded-lg hover:bg-red-500/10" title="Delete">
+                        <Trash2 size={14} />
                       </button>
                     </div>
                   </td>

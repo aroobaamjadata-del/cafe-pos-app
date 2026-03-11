@@ -7,12 +7,23 @@ import { autoUpdater } from 'electron-updater';
 import log from 'electron-log';
 import { runActivationFlow } from './activationFlow';
 import { bootApplication } from './startupLogic';
-import { startBackgroundSyncLayer } from './syncWorker';
+import { startBackgroundSyncLayer, forceSyncNow } from './syncWorker';
 import { staffLogin, setupStaffPassword, checkUserEmail, validateResetCredentials, performPasswordReset } from './staffLogin';
 
-// Setup logging for auto-updater
+// Setup logging
 log.transports.file.level = 'info';
+log.transports.console.level = 'debug';
 autoUpdater.logger = log;
+
+// Global Error Handlers
+process.on('uncaughtException', (err) => {
+  log.error('Uncaught Exception:', err);
+  dialog.showErrorBox('Critical System Error', err.message);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  log.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
 
 // Allow unsigned updates (no code signing certificate required)
 autoUpdater.forceDevUpdateConfig = false;
@@ -59,15 +70,29 @@ function createWindow(): void {
   });
 }
 
+export function notifyUIRemoteChange(table: string, eventType: string, data: any) {
+  if (mainWindow) {
+    mainWindow.webContents.send('sync:remote-update', { table, eventType, data });
+  }
+}
+
 // Initialize database
 const db = new DatabaseService();
 const backupService = new BackupService(db);
 
-app.whenReady().then(() => {
-  db.initialize();
-  createWindow();
-  backupService.scheduleAutoBackup();
-  startBackgroundSyncLayer(db);
+app.whenReady().then(async () => {
+  try {
+    log.info('Application starting...');
+    db.initialize();
+    createWindow();
+    backupService.scheduleAutoBackup();
+    startBackgroundSyncLayer(db);
+    log.info('System services initialized.');
+  } catch (err: any) {
+    log.error('Failed to initialize application:', err);
+    dialog.showErrorBox('Initialization Error', `Failed to start database: ${err.message}`);
+    app.quit();
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -341,3 +366,26 @@ ipcMain.handle('updater:quitAndInstall', () => autoUpdater.quitAndInstall(false,
 // System Activation
 ipcMain.handle('system:activate', (_e, tenantCode: string) => runActivationFlow(tenantCode, db));
 ipcMain.handle('system:boot', () => bootApplication(db));
+
+// ─── Manual Sync Controls ─────────────────────────────────────────────────────
+ipcMain.handle('sync:forceNow', async () => {
+  try {
+    return await forceSyncNow(db);
+  } catch (err: any) {
+    log.error('Manual sync failed:', err);
+    return { pushed: 0, pulled: false, errors: 1 };
+  }
+});
+
+ipcMain.handle('sync:getStatus', () => {
+  try {
+    const { getCacheDb } = require('./sqliteDatabase');
+    const cacheDb = getCacheDb();
+    const pending = cacheDb.prepare('SELECT COUNT(*) as c FROM sync_queue WHERE synced = 0').get() as any;
+    const failed = cacheDb.prepare("SELECT COUNT(*) as c FROM sync_queue WHERE synced = 0 AND error_message IS NOT NULL AND error_message != ''").get() as any;
+    const synced = cacheDb.prepare('SELECT COUNT(*) as c FROM sync_queue WHERE synced = 1').get() as any;
+    return { pending: pending.c, failed: failed.c, synced: synced.c };
+  } catch (err) {
+    return { pending: 0, failed: 0, synced: 0 };
+  }
+});

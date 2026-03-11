@@ -2,54 +2,98 @@ import { supabase } from './supabase';
 import * as os from 'os';
 import * as crypto from 'crypto';
 
-// Generate stable hardware ID based on MAC address and Hostname
+/**
+ * Generate a unique, stable hardware ID for this device.
+ * Uses OS hostname, MAC addresses, and architecture for consistency.
+ */
 export const generateHardwareId = () => {
   const interfaces = os.networkInterfaces();
-  let mac = 'unknown';
+  const macs: string[] = [];
+  
   for (const match of Object.values(interfaces)) {
     if (match) {
-      const found = match.find(i => !i.internal && i.mac && i.mac !== '00:00:00:00:00:00');
-      if (found) {
-        mac = found.mac;
-        break;
-      }
+      match.forEach(i => {
+        if (!i.internal && i.mac && i.mac !== '00:00:00:00:00:00') {
+          macs.push(i.mac);
+        }
+      });
     }
   }
 
-  const rawId = `${os.hostname()}-${mac}-${os.platform()}`;
+  // Sort MACs to ensure identical string if multiple interfaces exist
+  const stableMacs = macs.sort().join('|');
+  const rawId = `${os.hostname()}-${stableMacs}-${os.platform()}-${os.arch()}`;
   return crypto.createHash('sha256').update(rawId).digest('hex').substring(0, 32);
 };
 
+/**
+ * Register the POS terminal with the tenant.
+ * Enforces max_device limits stored in the tenant's subscription.
+ */
 export const registerDevice = async (tenantId: string) => {
-  const deviceId = generateHardwareId();
+  const hardwareId = generateHardwareId();
   const deviceName = os.hostname();
 
   try {
-    const { error } = await supabase.from('pos_devices').upsert({
-      tenant_id: tenantId,
-      device_id: deviceId, // Wait, `pos_devices` in your prompt uses `device_id` and `device_name`. But wait, database.ts uses hardware_id. I will map it as `device_id`.
-      device_name: deviceName,
-      activated_at: new Date().toISOString(),
-      status: 'online', // add this if you're keeping the old schema
-      last_seen_at: new Date().toISOString()
-    }, { onConflict: 'device_id' } as any);
+    // 1. Check if device is already registered for this tenant
+    const { data: existing, error: fetchErr } = await supabase
+      .from('pos_devices')
+      .select('id, status')
+      .eq('tenant_id', tenantId)
+      .eq('hardware_id', hardwareId)
+      .maybeSingle();
 
-    if (error) {
-        // if onConflict fails, try another way
-         const { error: error2 } = await supabase.from('pos_devices').upsert({
-          tenant_id: tenantId,
-          hardware_id: deviceId, // some tables use hardware_id
-          device_name: deviceName,
-          status: 'online', 
-          last_seen_at: new Date().toISOString()
-        }, { onConflict: 'hardware_id' } as any);
-        if (error2) throw error2;
+    if (!fetchErr && existing) {
+        if (existing.status === 'deactivated') {
+            return { success: false, error: 'This device has been deactivated by the administrator.' };
+        }
+        // Device already active, just updated its heartbeat
+        await supabase
+            .from('pos_devices')
+            .update({ last_seen_at: new Date().toISOString() })
+            .eq('id', existing.id);
+        
+        return { success: true, deviceId: hardwareId, deviceName };
     }
+
+    // 2. New device? Check tenant limit
+    const { data: tenant, error: tenErr } = await supabase
+      .from('tenants')
+      .select('max_devices')
+      .eq('id', tenantId)
+      .single();
+
+    if (tenErr || !tenant) return { success: false, error: 'Could not verify tenant subscription limits.' };
+
+    const { count, error: countErr } = await supabase
+      .from('pos_devices')
+      .select('id', { count: 'exact', head: true })
+      .eq('tenant_id', tenantId)
+      .eq('status', 'active');
+
+    if (countErr) return { success: false, error: 'Could not verify current activations.' };
+
+    if (tenant.max_devices && count !== null && count >= tenant.max_devices) {
+      return { success: false, error: `Maximum activation limit reached (${tenant.max_devices}). Please deactivate an old device in the Admin Dashboard.` };
+    }
+
+    // 3. Register the new device
+    const { error: regErr } = await supabase.from('pos_devices').insert({
+        tenant_id: tenantId,
+        hardware_id: hardwareId,
+        device_name: deviceName,
+        status: 'active',
+        last_seen_at: new Date().toISOString(),
+        activated_at: new Date().toISOString()
+    });
+
+    if (regErr) throw regErr;
     
-    return { success: true, deviceId, deviceName };
+    return { success: true, deviceId: hardwareId, deviceName };
   } catch (err: any) {
-    if (err.message.includes('fetch failed')) {
-      return { success: false, error: 'Network error while registering device.' };
+    console.error('[DEVICE_REG] Error:', err);
+    if (err.message?.includes('fetch failed')) {
+      return { success: false, error: 'Network error. Could not connect to the licensing server.' };
     }
     return { success: false, error: `Registration failed: ${err.message}` };
   }

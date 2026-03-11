@@ -190,5 +190,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
     removeStatusListener: () => {
       ipcRenderer.removeAllListeners('updater:status');
     }
-  }
+  },
+
+  // Sync controls — allows the UI to trigger manual sync and query queue size
+  sync: {
+    forceNow: () => ipcRenderer.invoke('sync:forceNow'),
+    getStatus: () => ipcRenderer.invoke('sync:getStatus'),
+    onRemoteUpdate: (callback: (table: string, eventType: string, data: any) => void) => {
+      ipcRenderer.on('sync:remote-update', (_event, value) => callback(value.table, value.eventType, value.data));
+    },
+    removeRemoteUpdateListener: () => {
+      ipcRenderer.removeAllListeners('sync:remote-update');
+    },
+  },
 });

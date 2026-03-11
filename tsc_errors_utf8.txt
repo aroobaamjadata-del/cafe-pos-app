@@ -1,0 +1,6 @@
+﻿src/modules/auth/LoginPage.tsx(32,52): error TS2339: Property 'checkUser' does not exist on type '{ login: (username: string, password: string) => Promise<any>; setupPassword: (email: string, password: string) => Promise<any>; logout: () => Promise<any>; }'.
+src/modules/auth/LoginPage.tsx(106,52): error TS2339: Property 'validateReset' does not exist on type '{ login: (username: string, password: string) => Promise<any>; setupPassword: (email: string, password: string) => Promise<any>; logout: () => Promise<any>; }'.
+src/modules/auth/LoginPage.tsx(128,52): error TS2339: Property 'performReset' does not exist on type '{ login: (username: string, password: string) => Promise<any>; setupPassword: (email: string, password: string) => Promise<any>; logout: () => Promise<any>; }'.
+src/modules/dashboard/Dashboard.tsx(214,98): error TS2339: Property 'cashier' does not exist on type 'Order'.
+src/modules/pos/LoyaltyPromptModal.tsx(86,49): error TS2322: Type '{ children: Element; title: string; onClose: () => void; size: "sm"; hideCloseButton: true; }' is not assignable to type 'IntrinsicAttributes & ModalProps'.
+  Property 'hideCloseButton' does not exist on type 'IntrinsicAttributes & ModalProps'.
