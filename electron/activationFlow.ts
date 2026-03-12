@@ -30,14 +30,7 @@ export const runActivationFlow = async (activationCode: string, db: DatabaseServ
     }
 
     // 3. Local Cache Provisioning
-    const cacheData = {
-        tenant_id: tenant.id,
-        tenant_name: tenant.name,
-        tenant_code: tenant.tenant_code,
-        status: tenant.status
-    };
-    
-    cacheTenantLocal(cacheData);
+    cacheTenantLocal(tenant);
     cacheDeviceLocal(registration.deviceId || '', registration.deviceName || '');
 
     // 4. Mirror in database.ts (License Service)
@@ -46,6 +39,9 @@ export const runActivationFlow = async (activationCode: string, db: DatabaseServ
         licenseKey: activationCode,
         status: 'active',
         tenantId: tenant.id,
+        tenantCode: tenant.tenant_code,
+        tenantStatus: tenant.status,
+        subscriptionPlan: tenant.subscription_plan || 'pro',
         cafeName: tenant.name,
         activatedAt: new Date().toISOString(),
         mode: 'online',

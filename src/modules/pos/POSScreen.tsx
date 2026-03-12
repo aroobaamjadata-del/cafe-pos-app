@@ -97,7 +97,7 @@ export default function POSScreen() {
     ]);
     // Note: We no longer filter out inactive products so they can show 'Unavailable'
     setProducts(prods);
-    setCategories(cats.filter((c: Category) => c.is_active === 1));
+    setCategories(cats); // Temporarily removing active filter to check for data existence
     setRecipes(recs);
     setLoading(false);
   };

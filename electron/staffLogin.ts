@@ -56,7 +56,8 @@ export const setupStaffPassword = async (email: string, password: string, db: Da
             const { data: cloudStaff, error: cloudErr } = await supabase
                 .from('staff')
                 .select('*')
-                .eq('email', email)
+                .ilike('email', email)
+                .eq('tenant_id', tenant.tenant_id) // Satisfy RLS
                 .maybeSingle();
 
             if (cloudErr) {
@@ -73,7 +74,8 @@ export const setupStaffPassword = async (email: string, password: string, db: Da
                 const { data: tenantData } = await supabase
                     .from('tenants')
                     .select('*')
-                    .eq('email', email)
+                    .ilike('email', email)
+                    .eq('id', tenant.tenant_id) // Satisfy RLS
                     .maybeSingle();
 
                 if (tenantData) {
@@ -116,10 +118,17 @@ export const setupStaffPassword = async (email: string, password: string, db: Da
 /**
  * Phase 1: Check if email exists and if setup is needed
  */
-export const checkUserEmail = async (email: string, db: DatabaseService) => {
+export const checkUserEmail = async (emailInput: string, db: DatabaseService) => {
     try {
+        const email = emailInput.trim();
         const tenant = getCachedTenant();
-        if (!tenant) return { success: false, message: 'Terminal not activated.' };
+        
+        if (!tenant) {
+            return { 
+                success: false, 
+                error: 'Terminal state invalid or inactive. Please contact support or reactivate.' 
+            };
+        }
 
         // 1. Check locally
         let user = db.users.getByEmail(email);
@@ -130,25 +139,26 @@ export const checkUserEmail = async (email: string, db: DatabaseService) => {
             const { data: cloudStaff } = await supabase
                 .from('staff')
                 .select('*')
-                .eq('email', email)
+                .ilike('email', email)
+                .eq('tenant_id', tenant.tenant_id)
                 .maybeSingle();
 
             if (cloudStaff) {
                 db.users.syncDown([cloudStaff]);
                 user = db.users.getByEmail(email);
             } else {
-                // Check if it is the owner
                 const { data: tenantData } = await supabase
                     .from('tenants')
                     .select('*')
-                    .eq('email', email)
+                    .ilike('email', email)
+                    .eq('id', tenant.tenant_id)
                     .maybeSingle();
 
                 if (tenantData) {
                     const adminRole = db.getDb().prepare("SELECT id FROM roles WHERE name = 'Admin'").get() as any;
                     db.users.create({
                         username: tenantData.email.split('@')[0],
-                        password: '', // Temporarily empty, setupPassword will handle it
+                        password: '',
                         full_name: tenantData.owner_name || 'Cafe Owner',
                         email: tenantData.email,
                         phone: tenantData.phone || '',
@@ -160,16 +170,19 @@ export const checkUserEmail = async (email: string, db: DatabaseService) => {
             }
         }
 
-        if (!user) return { exists: false };
+        if (!user) return { success: false, error: 'User not found for this cafe.' };
 
         return { 
-            exists: true, 
-            needsSetup: !user.password_hash || user.password_hash === '',
-            fullName: user.full_name,
-            email: user.email 
+            success: true,
+            data: {
+                exists: true, 
+                needsSetup: !user.password_hash || user.password_hash === '',
+                fullName: user.full_name,
+                email: user.email 
+            }
         };
     } catch (err: any) {
-        return { success: false, message: err.message };
+        return { success: false, error: err.message };
     }
 }
 

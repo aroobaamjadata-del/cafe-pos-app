@@ -30,15 +30,15 @@ export default function LoginPage() {
     setError('');
     try {
       const result = await window.electronAPI.auth.checkUser(email);
-      if (result.exists) {
-        setUserData(result);
-        if (result.needsSetup) {
+      if (result.success && result.data?.exists) {
+        setUserData(result.data);
+        if (result.data.needsSetup) {
           setStep('setup');
         } else {
           setStep('login');
         }
       } else {
-        setError('Email not found. Contact administrator.');
+        setError(result.error || 'Identity verification failed. Please check your email.');
       }
     } catch (err: any) {
       setError('Connection failed. Please check network.');
@@ -107,7 +107,7 @@ export default function LoginPage() {
       if (result.success) {
         setStep('forgot_reset');
       } else {
-        setError(result.message || 'Invalid credentials');
+        setError(result.error || 'Invalid credentials');
       }
     } catch (err) {
       setError('Validation error.');
@@ -132,7 +132,7 @@ export default function LoginPage() {
         setPassword('');
         setConfirmPassword('');
       } else {
-        setError(result.message || 'Reset failed');
+        setError(result.error || 'Reset failed');
       }
     } catch (err) {
       setError('Reset error.');

@@ -12,14 +12,14 @@ export const validateTenantCode = async (codeOrKey: string) => {
     console.log(`[ACTIVATION] Validating activation string: ${codeOrKey}`);
 
     // 1. Try treating it as a LICENSE KEY first
-    const { data: license, error: licErr } = await supabase
+      const { data: license, error: licErr } = await supabase
       .from('licenses')
       .select(`
         id, 
         status, 
         expires_at, 
         features, 
-        tenant:tenants(id, business_name, tenant_code, status)
+        tenant:tenants(id, business_name, tenant_code, status, subscription_plan)
       `)
       .eq('license_key', codeOrKey)
       .maybeSingle();
@@ -38,9 +38,10 @@ export const validateTenantCode = async (codeOrKey: string) => {
       // Map 'business_name' to the name property correctly, or just save it.
       const tenantToCache = { 
           id: tenant.id, 
-          name: tenant.business_name || (tenant as any).name, 
+          name: tenant.business_name, 
           tenant_code: tenant.tenant_code, 
-          status: tenant.status 
+          status: tenant.status,
+          subscription_plan: tenant.subscription_plan 
       };
 
       // Success: Cache locally
@@ -52,7 +53,7 @@ export const validateTenantCode = async (codeOrKey: string) => {
     // 2. Try treating it as a TENANT CODE directly
     const { data: tenant, error: tenErr } = await supabase
       .from('tenants')
-      .select('id, business_name, tenant_code, status')
+      .select('id, business_name, tenant_code, status, subscription_plan')
       .eq('tenant_code', codeOrKey)
       .maybeSingle();
 
@@ -61,9 +62,10 @@ export const validateTenantCode = async (codeOrKey: string) => {
 
       const tenantToCache = { 
           id: tenant.id, 
-          name: tenant.business_name || (tenant as any).name, 
+          name: tenant.business_name, 
           tenant_code: tenant.tenant_code, 
-          status: tenant.status 
+          status: tenant.status,
+          subscription_plan: tenant.subscription_plan
       };
 
       // Success: Cache locally

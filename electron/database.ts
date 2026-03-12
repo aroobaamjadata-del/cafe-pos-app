@@ -55,6 +55,7 @@ export class DatabaseService {
   public roles!: RolesService;
 
   initialize(): void {
+    console.log('[DATABASE] User Data Path:', app.getPath('userData'));
     if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
     this.db = new Database(DB_PATH);
     this.db.pragma('journal_mode = WAL');
@@ -78,24 +79,118 @@ export class DatabaseService {
     try { this.db.exec('ALTER TABLE products ADD COLUMN track_inventory INTEGER DEFAULT 1'); } catch(e){}
     try { this.db.exec('ALTER TABLE ingredients ADD COLUMN deleted_at DATETIME'); } catch(e){}
     
-    // Cloud Sync Infrastructure
-    const cloudSyncTables = [
+    this.createSchema();
+    
+    // ─── ROBUST MIGRATIONS SYSTEM ───
+    const migrateColumn = (table: string, column: string, type: string) => {
+      try {
+        const info = this.db.prepare(`PRAGMA table_info(${table})`).all() as any[];
+        if (!info.some(c => c.name === column)) {
+          this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+          console.log(`[MIGRATE] Added ${column} to ${table}`);
+        }
+      } catch (err) {
+        console.error(`[MIGRATE] Error adding ${column} to ${table}:`, err);
+      }
+    };
+
+    const cloudTables = [
       'customers', 'loyalty_cards', 'loyalty_transactions', 'users', 'products', 
       'categories', 'suppliers', 'orders', 'expenses', 'order_items', 'payments',
       'ingredients', 'inventory', 'stock_movements', 'ingredient_movements', 
       'product_variants', 'product_modifiers', 'recipes', 'modifiers', 'modifier_options'
     ];
-    for (const t of cloudSyncTables) {
-      try { this.db.exec(`ALTER TABLE ${t} ADD COLUMN cloud_id TEXT UNIQUE`); } catch(e) {}
-    }
     
+    for (const t of cloudTables) {
+      migrateColumn(t, 'cloud_id', 'TEXT');
+      try { this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_${t}_cloud_id ON ${t}(cloud_id)`); } catch(e){}
+    }
+
+    migrateColumn('order_items', 'variant_id', 'INTEGER');
+    migrateColumn('order_items', 'variant_name', 'TEXT');
+    migrateColumn('products', 'track_inventory', 'INTEGER DEFAULT 1');
+    migrateColumn('ingredients', 'deleted_at', 'DATETIME');
+    migrateColumn('inventory', 'min_quantity', 'REAL DEFAULT 5');
+    migrateColumn('inventory', 'unit', 'TEXT DEFAULT \'pcs\'');
+    migrateColumn('orders', 'loyalty_redeemed', 'INTEGER DEFAULT 0');
+    migrateColumn('orders', 'loyalty_discount_amount', 'REAL DEFAULT 0');
+    migrateColumn('orders', 'void_reason', 'TEXT');
+    migrateColumn('orders', 'void_at', 'DATETIME');
+    migrateColumn('orders', 'receipt_printed', 'INTEGER DEFAULT 0');
+    migrateColumn('suppliers', 'is_active', 'INTEGER DEFAULT 1');
+    migrateColumn('categories', 'sort_order', 'INTEGER DEFAULT 0');
+    try { this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_categories_tenant_name ON categories(tenant_id, name)`); } catch(e){}
+    try { this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_suppliers_tenant_name ON suppliers(tenant_id, name)`); } catch(e){}
+    migrateColumn('users', 'tenant_id', 'TEXT'); 
+    migrateColumn('users', 'cloud_id', 'TEXT'); 
+    try { this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_cloud_id ON users(cloud_id)`); } catch(e){}
+
+    // Diagnostic Log
+    try {
+      const tables = ['products', 'categories', 'orders', 'ingredients', 'inventory', 'customers'];
+      const stats: any = {};
+      for (const t of tables) {
+        const row = this.db.prepare(`SELECT COUNT(*) as c FROM ${t}`).get() as any;
+        stats[t] = row?.c;
+      }
+      console.log('[DIAGNOSTIC] Table counts:', JSON.stringify(stats));
+    } catch(e) { console.error('[DIAGNOSTIC] Failed to get stats:', e); }
+
+    // Backfill: If we have an active tenant, ensure all local records are tagged with their tenant_id
+    // This fixes issues where data was created before the multi-tenant migration
+    const activeTenant = getCachedTenant();
+    if (activeTenant?.tenant_id) {
+      console.log(`[STARTUP] Active Tenant detected: ${activeTenant.tenant_name} (${activeTenant.tenant_id})`);
+      const allTables = [
+        'roles', 'users', 'categories', 'suppliers', 'products', 'product_variants',
+        'inventory', 'stock_movements', 'customers', 'orders', 'order_items',
+        'payments', 'expenses', 'ingredients', 'recipes', 'modifiers',
+        'modifier_options', 'product_modifiers', 'ingredient_movements',
+        'loyalty_cards', 'loyalty_transactions', 'settings'
+      ];
+      for (const t of allTables) {
+        try {
+          // Tag NULLs, empty strings, 'null', 'undefined', or 'Cloud n Cream' (legacy name)
+          const legacyIds = ['null', 'undefined', 'Cloud n Cream', 'undefined-id'];
+          const placeHolders = legacyIds.map(() => '?').join(',');
+          
+          let res = this.db.prepare(`
+            UPDATE ${t} SET tenant_id = ? 
+            WHERE tenant_id IS NULL 
+               OR tenant_id = '' 
+               OR LOWER(tenant_id) IN (${placeHolders})
+          `).run(activeTenant.tenant_id, ...legacyIds.map(id => id.toLowerCase()));
+          
+          if (res.changes > 0) console.log(`[BACKFILL] Tagged ${res.changes} legacy/empty records in ${t} with ${activeTenant.tenant_id}`);
+          
+          // Emergency: If table has data but ZERO match current tenant AND we only have records with NO dashes (non-UUID),
+          // it means they are legacy records that didn't get caught above.
+          const total = this.db.prepare(`SELECT COUNT(*) as c FROM ${t}`).get() as any;
+          const matched = this.db.prepare(`SELECT COUNT(*) as c FROM ${t} WHERE tenant_id = ?`).get(activeTenant.tenant_id) as any;
+          
+          if (total.c > 0 && matched.c === 0) {
+             console.log(`[BACKFILL] Emergency: Table ${t} has ${total.c} records but 0 match tenant. Force tagging all.`);
+             const res2 = this.db.prepare(`UPDATE ${t} SET tenant_id = ?`).run(activeTenant.tenant_id);
+             if (res2.changes > 0) console.log(`[BACKFILL] Force-tagged ${res2.changes} records in ${t}`);
+          }
+        } catch(e: any) {
+          console.error(`[BACKFILL] Failed for ${t}:`, e.message);
+        }
+      }
+    } else {
+      console.log('[STARTUP] No active tenant detected in cache.');
+    }
+
+    // DEBUG: Log raw data state
+    try {
+      const sample = this.db.prepare('SELECT id, name, tenant_id FROM categories LIMIT 3').all();
+      console.log('[DEBUG] Category Samples:', JSON.stringify(sample));
+    } catch(e) {}
+
     // Schema Fix for variant support in order_items
     try { this.db.exec('ALTER TABLE order_items ADD COLUMN variant_id INTEGER REFERENCES product_variants(id)'); } catch(e) {}
     try { this.db.exec('ALTER TABLE order_items ADD COLUMN variant_name TEXT'); } catch(e) {}
-    
-    this.db.pragma('synchronous = NORMAL');
-    this.db.pragma('cache_size = 10000');
-    this.createSchema();
+
     this.seedDefaults();
     this.initServices();
   }
@@ -155,6 +250,7 @@ export class DatabaseService {
         role_id INTEGER REFERENCES roles(id),
         is_active INTEGER NOT NULL DEFAULT 1,
         last_login DATETIME,
+        cloud_id TEXT UNIQUE,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         deleted_at DATETIME,
@@ -338,7 +434,7 @@ export class DatabaseService {
       );
 
       CREATE TABLE IF NOT EXISTS settings (
-        tenant_id TEXT NOT NULL,
+        tenant_id TEXT,
         key TEXT NOT NULL,
         value TEXT,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -589,7 +685,7 @@ class AuthService {
     const user = this.db.prepare(`
       SELECT u.*, r.name as role_name, r.permissions
       FROM users u LEFT JOIN roles r ON u.role_id = r.id
-      WHERE (u.username = ? OR u.email = ?) 
+      WHERE (LOWER(u.username) = LOWER(?) OR LOWER(u.email) = LOWER(?)) 
         AND u.tenant_id = ? 
         AND u.is_active = 1 
         AND u.deleted_at IS NULL
@@ -651,7 +747,7 @@ class UsersService {
         SELECT u.id, u.username, u.full_name, u.email, u.phone, u.tenant_id,
                u.role_id, r.name as role_name, u.is_active, u.last_login, u.created_at
         FROM users u LEFT JOIN roles r ON u.role_id = r.id
-        WHERE u.deleted_at IS NULL AND u.tenant_id = ?
+        WHERE u.deleted_at IS NULL AND LOWER(u.tenant_id) = LOWER(?)
         ORDER BY u.full_name
       `).all(tenant.tenant_id);
     } catch (err) {
@@ -669,7 +765,7 @@ class UsersService {
   getByEmail(email: string): any {
     const tenant = getCachedTenant();
     if (!tenant) return null;
-    return this.db.prepare('SELECT * FROM users WHERE email = ? AND tenant_id = ? AND deleted_at IS NULL').get(email, tenant.tenant_id);
+    return this.db.prepare('SELECT * FROM users WHERE LOWER(email) = LOWER(?) AND tenant_id = ? AND deleted_at IS NULL').get(email, tenant.tenant_id);
   }
 
   create(data: any): any {
@@ -754,13 +850,25 @@ class CategoriesService {
   constructor(private db: Database.Database) {}
 
   getAll(): any[] {
-    return this.db.prepare(`
+    const tenant = getCachedTenant();
+    if (!tenant) {
+      console.log('[CATEGORIES] No active tenant found in cache.');
+      return [];
+    }
+    const cats = this.db.prepare(`
       SELECT c.*, COUNT(p.id) as product_count
       FROM categories c
       LEFT JOIN products p ON p.category_id = c.id AND p.deleted_at IS NULL
-      WHERE c.deleted_at IS NULL
+      WHERE LOWER(c.tenant_id) = LOWER(?) AND c.deleted_at IS NULL
       GROUP BY c.id ORDER BY c.sort_order, c.name
-    `).all();
+    `).all(tenant.tenant_id);
+
+    if (cats.length === 0) {
+      console.log('[CATEGORIES] Zero categories found for this tenant after case-insensitive check.');
+    }
+
+    console.log(`[CATEGORIES] Found ${cats.length} categories for tenant: ${tenant.tenant_id}`);
+    return cats;
   }
 
   getById(id: number): any {
@@ -845,7 +953,10 @@ class ProductsService {
 
   getAll(): any[] {
     const tenant = getCachedTenant();
-    if (!tenant) return [];
+    if (!tenant) {
+      console.log('[PRODUCTS] No active tenant found in cache.');
+      return [];
+    }
 
     const products = this.db.prepare(`
       SELECT p.*, c.name as category_name, c.color as category_color,
@@ -853,9 +964,11 @@ class ProductsService {
       FROM products p
       LEFT JOIN categories c ON p.category_id = c.id
       LEFT JOIN inventory i ON i.product_id = p.id
-      WHERE p.tenant_id = ? AND p.deleted_at IS NULL
+      WHERE LOWER(p.tenant_id) = LOWER(?) AND p.deleted_at IS NULL
       ORDER BY c.sort_order, p.name
     `).all(tenant.tenant_id);
+
+    console.log(`[PRODUCTS] Found ${products.length} products for tenant: ${tenant.tenant_id}`);
 
     const variants = this.db.prepare('SELECT * FROM product_variants WHERE tenant_id = ? AND deleted_at IS NULL').all(tenant.tenant_id) as any[];
     for (const p of products as any[]) {
@@ -1219,7 +1332,7 @@ class OrdersService {
       JOIN users u ON o.user_id = u.id
       LEFT JOIN customers c ON o.customer_id = c.id
       LEFT JOIN order_items oi ON oi.order_id = o.id
-      WHERE o.tenant_id = ?
+      WHERE LOWER(o.tenant_id) = LOWER(?)
       GROUP BY o.id
       ORDER BY o.created_at DESC LIMIT 200
     `).all(tenant.tenant_id);
@@ -1377,8 +1490,8 @@ class InventoryService {
       SELECT i.*, p.name as product_name, p.sku, c.name as category_name
       FROM inventory i
       JOIN products p ON i.product_id = p.id
-      JOIN categories c ON p.category_id = c.id
-      WHERE i.tenant_id = ? AND p.deleted_at IS NULL
+      LEFT JOIN categories c ON p.category_id = c.id
+      WHERE LOWER(i.tenant_id) = LOWER(?) AND p.deleted_at IS NULL
       ORDER BY p.name
     `).all(tenant.tenant_id);
   }
@@ -2352,10 +2465,16 @@ class SettingsService {
 
   get(): Record<string, string> {
     const tenant = getCachedTenant();
-    if (!tenant) return {};
-    const rows = this.db.prepare('SELECT key, value FROM settings WHERE tenant_id = ?').all(tenant.tenant_id) as any[];
+    const rows = this.db.prepare('SELECT key, value FROM settings WHERE tenant_id = ? OR tenant_id IS NULL').all(tenant?.tenant_id || null) as any[];
     const settings: Record<string, string> = {};
-    for (const r of rows) settings[r.key] = r.value;
+    for (const r of rows) {
+      // If we have both a tenant-specific and a default setting, the tenant-specific one should ideally win.
+      // Since we loop through all rows, and usually tenant-specific ones would be inserted later or we could sort.
+      // For now, simpler:
+      if (!settings[r.key] || r.tenant_id !== null) {
+          settings[r.key] = r.value;
+      }
+    }
     return settings;
   }
 
@@ -2555,10 +2674,10 @@ export class LicenseService {
     `).run(hardwareId, os.hostname(), now, now);
 
     // Also keep old settings for backward compatibility
-    const stmt = this.db.prepare('INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)');
-    stmt.run('license_status', 'active');
-    stmt.run('license_data', encryptText(JSON.stringify({ licenseKey, tenantId: payload.tenantId, cafeName: payload.cafeName })));
-    if (payload.cafeName) stmt.run('store_name', payload.cafeName);
+    const stmt = this.db.prepare('INSERT OR REPLACE INTO settings (tenant_id, key, value, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)');
+    stmt.run(payload.tenantId, 'license_status', 'active');
+    stmt.run(payload.tenantId, 'license_data', encryptText(JSON.stringify({ licenseKey, tenantId: payload.tenantId, cafeName: payload.cafeName })));
+    if (payload.cafeName) stmt.run(payload.tenantId, 'store_name', payload.cafeName);
 
     // CRITICAL: Synonimize with pos_offline_cache.db for global tenant visibility
     cacheTenantLocal({

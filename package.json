@@ -1,6 +1,6 @@
 {
   "name": "cloud-n-cream-pos",
-  "version": "1.0.6",
+  "version": "2.0.0",
   "description": "Cloud n Cream - Production-Ready Cafe POS Desktop Application",
   "main": "dist/electron/main.js",
   "homepage": "./",
@@ -81,18 +81,8 @@
       "node_modules/**/*",
       "package.json"
     ],
-    "extraResources": [
-      {
-        "from": "resources/",
-        "to": "resources/",
-        "filter": [
-          "**/*"
-        ]
-      }
-    ],
     "win": {
-      "target": "nsis",
-      "icon": "resources/icon.ico"
+      "target": "nsis"
     },
     "nsis": {
       "oneClick": false,

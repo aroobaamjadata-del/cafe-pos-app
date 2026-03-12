@@ -72,7 +72,7 @@ export default function TitleBar() {
       <div className="flex items-center gap-2">
         <span className="text-lg">☕</span>
         <span className="text-sm font-semibold text-dark-100 font-display">Cloud n Cream POS</span>
-        <span className="text-dark-500 text-xs ml-2">v1.0.6</span>
+        <span className="text-dark-500 text-xs ml-2">v2.0.0</span>
       </div>
 
       {/* Right side */}

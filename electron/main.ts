@@ -203,61 +203,58 @@ ipcMain.handle('users:changePassword', (_e, id: number, newPassword: string) =>
   db.users.changePassword(id, newPassword));
 
 // Categories
-ipcMain.handle('categories:getAll', () => db.categories.getAll());
+ipcMain.handle('categories:getAll', async () => { try { const res = db.categories.getAll(); console.log(`[IPC] categories:getAll -> ${res.length} items`); return res; } catch(e) { console.error(e); return []; } });
 ipcMain.handle('categories:create', (_e, data: any) => db.categories.create(data));
 ipcMain.handle('categories:update', (_e, id: number, data: any) => db.categories.update(id, data));
 ipcMain.handle('categories:delete', (_e, id: number) => db.categories.delete(id));
 
 // Products
-ipcMain.handle('products:getAll', () => db.products.getAll());
-ipcMain.handle('products:getByCategory', (_e, categoryId: number) =>
-  db.products.getByCategory(categoryId));
+ipcMain.handle('products:getAll', async () => { try { const res = db.products.getAll(); console.log(`[IPC] products:getAll -> ${res.length} items`); return res; } catch(e) { console.error(e); return []; } });
+ipcMain.handle('products:getByCategory', (_e, categoryId: number) => { try { return db.products.getByCategory(categoryId); } catch(e) { return []; } });
 ipcMain.handle('products:create', (_e, data: any) => db.products.create(data));
 ipcMain.handle('products:update', (_e, id: number, data: any) => db.products.update(id, data));
 ipcMain.handle('products:delete', (_e, id: number) => db.products.delete(id));
-ipcMain.handle('products:search', (_e, query: string) => db.products.search(query));
+ipcMain.handle('products:search', (_e, query: string) => { try { return db.products.search(query); } catch(e) { return []; } });
 
 // Orders
 ipcMain.handle('orders:create', (_e, data: any) => db.orders.create(data));
-ipcMain.handle('orders:getAll', () => db.orders.getAll());
-ipcMain.handle('orders:getById', (_e, id: number) => db.orders.getById(id));
-ipcMain.handle('orders:getByDateRange', (_e, start: string, end: string) =>
-  db.orders.getByDateRange(start, end));
+ipcMain.handle('orders:getAll', async () => { try { return db.orders.getAll(); } catch(e) { console.error(e); return []; } });
+ipcMain.handle('orders:getById', (_e, id: number) => { try { return db.orders.getById(id); } catch(e) { return null; } });
+ipcMain.handle('orders:getByDateRange', (_e, start: string, end: string) => { try { return db.orders.getByDateRange(start, end); } catch(e) { return []; } });
 ipcMain.handle('orders:void', (_e, id: number, reason: string) => db.orders.void(id, reason));
 
 // Inventory
-ipcMain.handle('inventory:getAll', () => db.inventory.getAll());
-ipcMain.handle('inventory:getLowStock', () => db.inventory.getLowStock());
+ipcMain.handle('inventory:getAll', async () => { try { return db.inventory.getAll(); } catch(e) { console.error(e); return []; } });
+ipcMain.handle('inventory:getLowStock', async () => { try { return db.inventory.getLowStock(); } catch(e) { return []; } });
 ipcMain.handle('inventory:adjustStock', (_e, productId: number, qty: number, type: string, notes: string) =>
   db.inventory.adjustStock(productId, qty, type, notes));
-ipcMain.handle('inventory:getMovements', (_e, productId?: number) =>
-  db.inventory.getMovements(productId));
+ipcMain.handle('inventory:getMovements', (_e, productId?: number) => { try { return db.inventory.getMovements(productId); } catch(e) { return []; } });
 
 // Ingredients
-ipcMain.handle('ingredients:getAll', () => db.ingredients.getAll());
-ipcMain.handle('ingredients:getLowStock', () => db.ingredients.getLowStock());
+ipcMain.handle('ingredients:getAll', async () => { try { return db.ingredients.getAll(); } catch(e) { console.error(e); return []; } });
+ipcMain.handle('ingredients:getLowStock', async () => { try { return db.ingredients.getLowStock(); } catch(e) { return []; } });
 ipcMain.handle('ingredients:create', (_e, data: any) => db.ingredients.create(data));
 ipcMain.handle('ingredients:update', (_e, id: number, data: any) => db.ingredients.update(id, data));
 ipcMain.handle('ingredients:delete', (_e, id: number) => db.ingredients.delete(id));
 ipcMain.handle('ingredients:adjustStock', (_e, id: number, qty: number, type: string, notes: string, userId?: number) =>
   db.ingredients.adjustStock(id, qty, type, notes, userId));
-ipcMain.handle('ingredients:getMovements', (_e, ingredientId?: number) =>
-  db.ingredients.getMovements(ingredientId));
+ipcMain.handle('ingredients:getMovements', (_e, ingredientId?: number) => { try { return db.ingredients.getMovements(ingredientId); } catch(e) { return []; } });
 
 // Recipes
-ipcMain.handle('recipes:getAll', () => db.recipes.getAll());
-ipcMain.handle('recipes:getForProduct', (_e, productId: number) => db.recipes.getForProduct(productId));
+ipcMain.handle('recipes:getAll', async () => { try { return db.recipes.getAll(); } catch(e) { console.error(e); return []; } });
+ipcMain.handle('recipes:getForProduct', (_e, productId: number) => { try { return db.recipes.getForProduct(productId); } catch(e) { return []; } });
 ipcMain.handle('recipes:setRecipe', (_e, productId: number, items: any[]) => db.recipes.setRecipe(productId, items));
 ipcMain.handle('recipes:upsert', (_e, productId: number, ingredientId: number, quantity: number, unit?: string) =>
   db.recipes.upsert(productId, ingredientId, quantity, unit));
 ipcMain.handle('recipes:removeIngredient', (_e, productId: number, ingredientId: number) =>
   db.recipes.removeIngredient(productId, ingredientId));
-ipcMain.handle('recipes:checkAvailability', (_e, productId: number, qty: number) =>
-  db.recipes.checkAvailability(productId, qty));
+ipcMain.handle('recipes:checkAvailability', (_e, productId: number, qty: number) => { 
+  try { return db.recipes.checkAvailability(productId, qty); } catch(e) { return { available: true }; } 
+});
 
 // Modifiers
-ipcMain.handle('modifiers:getAll', () => db.modifiers.getAll());
-ipcMain.handle('modifiers:getForProduct', (_e, productId: number) => db.modifiers.getForProduct(productId));
+ipcMain.handle('modifiers:getAll', async () => { try { return db.modifiers.getAll(); } catch(e) { return []; } });
+ipcMain.handle('modifiers:getForProduct', (_e, productId: number) => { try { return db.modifiers.getForProduct(productId); } catch(e) { return []; } });
 ipcMain.handle('modifiers:createModifier', (_e, data: any) => db.modifiers.createModifier(data));
 ipcMain.handle('modifiers:updateModifier', (_e, id: number, data: any) => db.modifiers.updateModifier(id, data));
 ipcMain.handle('modifiers:deleteModifier', (_e, id: number) => db.modifiers.deleteModifier(id));
@@ -303,12 +300,11 @@ ipcMain.handle('reports:getProductPerformance', (_e, start: string, end: string)
   db.reports.getProductPerformance(start, end));
 ipcMain.handle('reports:getCategoryPerformance', (_e, start: string, end: string) =>
   db.reports.getCategoryPerformance(start, end));
-ipcMain.handle('reports:getDashboard', () => db.reports.getDashboard());
-ipcMain.handle('reports:getSalesTrend', (_e, days: number) => db.reports.getSalesTrend(days));
+ipcMain.handle('reports:getDashboard', async () => { try { return db.reports.getDashboard(); } catch(e) { console.error(e); return null; } });
+ipcMain.handle('reports:getSalesTrend', (_e, days: number) => { try { return db.reports.getSalesTrend(days); } catch(e) { return []; } });
 ipcMain.handle('reports:getIngredientConsumption', (_e, start: string, end: string) =>
   db.reports.getIngredientConsumption(start, end));
-ipcMain.handle('reports:getProfitSummary', (_e, start: string, end: string) =>
-  db.reports.getProfitSummary(start, end));
+ipcMain.handle('reports:getProfitSummary', (_e, start: string, end: string) => { try { return db.reports.getProfitSummary(start, end); } catch(e) { return null; } });
 
 // Settings
 ipcMain.handle('settings:get', () => db.settings.get());
